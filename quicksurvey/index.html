@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="theme-color" content="#111827"/>
+<title>Quick Survey — RAL</title>
+
+<!-- PWA icons -->
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png"/>
+<link rel="icon" type="image/png" sizes="16x16" href="./icons/favicon-16.png"/>
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png"/>
+<meta name="apple-mobile-web-app-title" content="Quick Survey"/>
+<meta name="application-name" content="Quick Survey"/>
+
+<!-- Preconnect to fonts for faster first paint -->
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800&family=Barlow:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+html,body{font-family:'Barlow',sans-serif;background:#e4e7ec;color:#111827;height:100%;overflow:hidden;overscroll-behavior:none;}
+body{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);}
+#root{height:100%;}
+input,textarea,select{font-size:16px;}
+button{touch-action:manipulation;}
+::-webkit-scrollbar{width:3px;height:3px;}
+::-webkit-scrollbar-track{background:#d1d5db;}
+::-webkit-scrollbar-thumb{background:#1e3a5f;border-radius:2px;}
+
+/* Loading splash — visible until React mounts */
+#splash{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#e4e7ec;gap:12px;z-index:9999;transition:opacity 0.2s}
+#splash.gone{opacity:0;pointer-events:none}
+.splash-logo{width:48px;height:48px;background:#111827;border-radius:10px;display:flex;align-items:center;justify-content:center}
+.splash-logo svg{width:24px;height:24px}
+.splash-spinner{width:20px;height:20px;border:2px solid #d1d5db;border-top-color:#2563eb;border-radius:50%;animation:spin 0.8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.splash-txt{font-family:'Barlow Condensed',sans-serif;font-size:13px;color:#64748b;letter-spacing:1.5px;font-weight:700}
+</style>
+</head>
+<body>
+<div id="splash">
+  <div class="splash-logo">
+    <svg viewBox="0 0 16 16" fill="none">
+      <rect x="1" y="1" width="6" height="6" rx="1" fill="white"/>
+      <rect x="9" y="1" width="6" height="6" rx="1" fill="white" opacity="0.4"/>
+      <rect x="1" y="9" width="6" height="6" rx="1" fill="white" opacity="0.4"/>
+      <rect x="9" y="9" width="6" height="6" rx="1" fill="white"/>
+    </svg>
+  </div>
+  <div class="splash-spinner"></div>
+  <div class="splash-txt">QUICK SURVEY</div>
+</div>
+<div id="root"></div>
+<script type="module" src="/src/main.jsx"></script>
+</body>
+</html>
