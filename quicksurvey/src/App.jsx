@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
-import { C, ST, SC, SL, HC, SKEY_USER, APP_VERSION } from './lib/constants.js';
+import { C, ST, SC, SL, HC, HAZARDS, RT, ROLES, SKEY_USER } from './lib/constants.js';
 import { pCol, getMeas, useIsMobile, useDebouncedCallback, useOnline } from './lib/helpers.js';
-import { dbGetAll, dbPut, openDB, migrateProjectIfNeeded, revokeAllPhotoUrls, deletePhoto, getPhotoUrl } from './lib/db.js';
+import { dbGetAll, dbPut, migrateProjectIfNeeded, revokeAllPhotoUrls, deletePhoto, getPhotoUrl } from './lib/db.js';
 import { processAndStoreElevationPhoto } from './lib/photo.js';
 
 import { UserSetup } from './components/UserSetup.jsx';
@@ -11,14 +11,16 @@ import { Marker } from './components/Marker.jsx';
 import { Toast } from './components/Toast.jsx';
 import { PhotoImg } from './components/PhotoImg.jsx';
 
-// Lazy-load heavy modals — they only download when first opened
+// Lazy modals
 const PinModal = lazy(() => import('./components/PinModal.jsx').then(m => ({ default: m.PinModal })));
 const SummaryTable = lazy(() => import('./components/SummaryTable.jsx').then(m => ({ default: m.SummaryTable })));
 const TrashPanel = lazy(() => import('./components/TrashPanel.jsx').then(m => ({ default: m.TrashPanel })));
 const SurveyReview = lazy(() => import('./components/SurveyReview.jsx').then(m => ({ default: m.SurveyReview })));
 const RoleSwitcher = lazy(() => import('./components/RoleSwitcher.jsx').then(m => ({ default: m.RoleSwitcher })));
 
-// ── PWA install handler — sets up window.__qsInstallApp for the RoleSwitcher ──
+const IS = { width: '100%', background: C.card, border: '1px solid ' + C.border, borderRadius: 7, padding: '9px 12px', color: C.text, fontSize: 13, outline: 'none', fontFamily: 'Barlow,sans-serif' };
+
+// PWA install hook — capture beforeinstallprompt globally
 let _deferredPrompt = null;
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeinstallprompt', e => {
@@ -43,870 +45,884 @@ if (typeof window !== 'undefined') {
   };
 }
 
+// Component that renders the elevation photo with a ref so we can read its bounding box
+function ElevationPhoto({ photoId, imgRef, onDimsChange }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!photoId) { setUrl(null); return; }
+    getPhotoUrl(photoId).then(u => { if (!cancelled) setUrl(u); });
+    return () => { cancelled = true; };
+  }, [photoId]);
+
+  const onLoad = (e) => {
+    const img = e.currentTarget;
+    onDimsChange({ w: img.offsetWidth || 1, h: img.offsetHeight || 1 });
+  };
+
+  if (!url) return null;
+  return (
+    <img
+      ref={imgRef}
+      src={url}
+      onLoad={onLoad}
+      alt=""
+      style={{ display: 'block', maxWidth: '72vw', maxHeight: '88vh', objectFit: 'contain', pointerEvents: 'none' }}
+      draggable={false}
+    />
+  );
+}
+
+// Mobile photo wrapper — different size constraints
+function ElevationPhotoMobile({ photoId, imgRef, onDimsChange }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!photoId) { setUrl(null); return; }
+    getPhotoUrl(photoId).then(u => { if (!cancelled) setUrl(u); });
+    return () => { cancelled = true; };
+  }, [photoId]);
+
+  const onLoad = (e) => {
+    const img = e.currentTarget;
+    onDimsChange({ w: img.offsetWidth || 1, h: img.offsetHeight || 1 });
+  };
+
+  if (!url) return null;
+  return (
+    <img
+      ref={imgRef}
+      src={url}
+      onLoad={onLoad}
+      alt=""
+      style={{ display: 'block', maxWidth: '100vw', maxHeight: 'calc(100vh - 200px)', objectFit: 'contain', pointerEvents: 'none' }}
+      draggable={false}
+    />
+  );
+}
+
 export default function App({ onReady }) {
-  // ── User profile ────────────────────────────────────────────────────────────
+  const isMobile = useIsMobile();
+  const isOnline = useOnline();
+
+  // User profile (from localStorage)
   const [user, setUser] = useState(() => {
-    try {
-      const saved = localStorage.getItem(SKEY_USER);
-      return saved ? JSON.parse(saved) : null;
-    } catch { return null; }
+    try { const s = localStorage.getItem(SKEY_USER); return s ? JSON.parse(s) : null; }
+    catch { return null; }
   });
 
-  // ── Top-level screen state ──────────────────────────────────────────────────
-  const [screen, setScreen] = useState('home'); // 'home' | 'setup' | 'survey'
+  const [screen, setScreen] = useState('home');
   const [project, setProject] = useState(null);
-  const [active, setActive] = useState(0);     // active elevation index
-  const [showToast, setShowToast] = useState('');
-  const [showRole, setShowRole] = useState(false);
-
-  // ── Canvas state ────────────────────────────────────────────────────────────
+  const [rl, setRl] = useState([]);
+  const [ae, setAe] = useState(0);
+  const [mode, setMode] = useState('pan');
+  const [movId, setMovId] = useState(null);
+  const [dupFromId, setDupFromId] = useState(null);
   const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [mode, setMode] = useState('pan');     // 'pan' | 'pin' | 'move' | 'delete'
-  const [movingPin, setMovingPin] = useState(null);
-  const [selectedPin, setSelectedPin] = useState(null);
-  const [editPin, setEditPin] = useState(null);
-  const [imgDims, setImgDims] = useState({ w: 0, h: 0 });
-  const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
-  const [showSummary, setShowSummary] = useState(false);
+  const [pan_, setPan] = useState({ x: 0, y: 0 });
+  const [selPin, setSelPin] = useState(null);
+  const [modal, setModal] = useState(null);
+  const [nid, setNid] = useState(1);
+  const [csz, setCsz] = useState({ w: 800, h: 600 });
+  const [imgDims, setImgDims] = useState({ w: 1, h: 1 });
+  const [showT, setShowT] = useState(false);
   const [showTrash, setShowTrash] = useState(false);
+  const [showMore, setShowMore] = useState(false);
+  const [showIndex, setShowIndex] = useState(false);
   const [showReview, setShowReview] = useState(false);
-  const [showIndex, setShowIndex] = useState(false);  // mobile drawer
-  const [showMore, setShowMore] = useState(false);    // mobile ⋯ menu
-  const [searchQ, setSearchQ] = useState('');
+  const [showRole, setShowRole] = useState(false);
+  const [indexSearch, setIndexSearch] = useState('');
+  const [toast, setToast] = useState(null);
 
-  // ── Refs (used inside event handlers to avoid stale closures) ───────────────
-  const canvasRef = useRef(null);
-  const imgRef = useRef(null);
-  const modeRef = useRef(mode);
-  const movRef = useRef(null);                 // pin id being moved
-  const dupFromRef = useRef(null);             // pin id we just duplicated from
-  const zoomRef = useRef(zoom);
-  const panRef = useRef(pan);
+  const cRef = useRef(null);    // canvas div
+  const iRef = useRef(null);    // <img> for elevation photo
   const undoStackRef = useRef([]);
-  const draggingRef = useRef(false);
-  const dragStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
-  const pinchRef = useRef(null);
+  const gestureRef = useRef({ panning: false, pinching: false, tapCandidate: false, moved: false, startX: 0, startY: 0, startPanX: 0, startPanY: 0, startDist: 0, startZoom: 1, startMidX: 0, startMidY: 0, tapPos: null });
 
-  useEffect(() => { modeRef.current = mode; }, [mode]);
-  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
-  useEffect(() => { panRef.current = pan; }, [pan]);
-
-  const isMobile = useIsMobile(900);
-  const online = useOnline();
-
-  // ── First mount: signal splash to hide ──────────────────────────────────────
+  // Hide splash once mounted
   useEffect(() => { if (onReady) onReady(); }, [onReady]);
 
-  // ── Persistence: debounced save when project changes ────────────────────────
-  const [saveProjectDebounced, flushSave] = useDebouncedCallback(async (p) => {
-    if (p) await dbPut(p);
+  // Canvas resize observer
+  useEffect(() => {
+    if (!cRef.current) return;
+    const obs = new ResizeObserver(entries => {
+      for (const e of entries) setCsz({ w: e.contentRect.width, h: e.contentRect.height });
+    });
+    obs.observe(cRef.current);
+    return () => obs.disconnect();
+  }, [screen]);
+
+  // Image dims observer — watches the <img> as it loads/resizes
+  useEffect(() => {
+    if (screen !== 'survey') return;
+    const img = iRef.current;
+    if (!img) return;
+    const update = () => setImgDims({ w: img.offsetWidth || 1, h: img.offsetHeight || 1 });
+    update();
+    const obs = new ResizeObserver(update);
+    obs.observe(img);
+    return () => obs.disconnect();
+  }, [project, ae, screen]);
+
+  // Debounced persistence
+  const [persistDebounced, persistFlush] = useDebouncedCallback((p) => {
+    dbPut(p).catch(e => console.error('persist failed', e));
   }, 400);
 
   useEffect(() => {
-    if (project) saveProjectDebounced(project);
-  }, [project, saveProjectDebounced]);
-
-  // Flush any pending writes before page unload
-  useEffect(() => {
-    const h = () => { if (project) flushSave(project); };
+    const h = () => { if (persistFlush) persistFlush(); };
     window.addEventListener('beforeunload', h);
     return () => window.removeEventListener('beforeunload', h);
-  }, [project, flushSave]);
+  }, [persistFlush]);
 
-  // ── Toast helper ────────────────────────────────────────────────────────────
-  const toast = useCallback((msg) => {
-    setShowToast(msg);
-    setTimeout(() => setShowToast(''), 2000);
-  }, []);
+  const saveUser = u => { setUser(u); localStorage.setItem(SKEY_USER, JSON.stringify(u)); };
+  const switchRole = r => saveUser({ ...user, role: r });
+  const switchUser = u => saveUser({ ...user, name: u.name, company: u.company });
+  const logout = () => { localStorage.removeItem(SKEY_USER); setUser(null); setScreen('home'); setProject(null); };
 
-  // ── Save user profile ───────────────────────────────────────────────────────
-  const saveUser = (u) => {
-    setUser(u);
-    try { localStorage.setItem(SKEY_USER, JSON.stringify(u)); } catch {}
-  };
+  if (!user) return <UserSetup onDone={u => saveUser(u)}/>;
 
-  // ── Open project (with migration) ───────────────────────────────────────────
+  const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 2200); };
+  const persist = p => persistDebounced(p);
+  const persistNow = p => { persistFlush(p); };
+
   const openProject = async (p) => {
-    revokeAllPhotoUrls();  // free old object URLs from any previous project
+    revokeAllPhotoUrls();
     const migrated = await migrateProjectIfNeeded(p);
     setProject(migrated);
-    setActive(0);
-    setZoom(1); setPan({ x: 0, y: 0 });
+    setRl(migrated.repairList || migrated.repairTypes || []);
+    const maxId = migrated.elevations.flatMap(e => [...(e.pins || []), ...(e.trash || [])]).reduce((m, pi) => Math.max(m, pi.id), 0);
+    setNid(maxId + 1);
+    setAe(0);
     setMode('pan');
+    setZoom(1); setPan({ x: 0, y: 0 });
     undoStackRef.current = [];
     setScreen('survey');
   };
 
-  // ── Create project ──────────────────────────────────────────────────────────
-  const createProject = async (name, elevationNames) => {
-    const newP = {
+  const createProject = async (name, names) => {
+    const p = {
       id: Date.now().toString(),
       name,
       createdAt: new Date().toISOString(),
-      createdBy: user.name,
+      user: user.name,
+      company: user.company,
       _migratedToBlobs: true,
-      repairTypes: [],
-      elevations: elevationNames.map(n => ({ name: n, imgPhotoId: null, pins: [], trash: [] })),
+      repairList: [],
+      elevations: names.map(n => ({ name: n, imgPhotoId: null, pins: [], trash: [] })),
     };
-    await dbPut(newP);
-    setProject(newP);
-    setActive(0);
-    setScreen('survey');
+    await dbPut(p);
+    openProject(p);
   };
 
-  // ── Leave current project ───────────────────────────────────────────────────
   const goHome = () => {
-    if (project) flushSave(project);
+    if (persistFlush) persistFlush();
     revokeAllPhotoUrls();
     setProject(null);
     setScreen('home');
   };
 
-  // ── Push undo snapshot ──────────────────────────────────────────────────────
-  const pushUndo = useCallback(() => {
-    if (!project) return;
-    const snap = JSON.stringify(project);
-    undoStackRef.current.push(snap);
-    if (undoStackRef.current.length > 20) undoStackRef.current.shift();
-  }, [project]);
+  const el = project?.elevations[ae];
 
-  const undo = useCallback(() => {
-    const snap = undoStackRef.current.pop();
-    if (!snap) { toast('Nothing to undo'); return; }
-    try {
-      setProject(JSON.parse(snap));
-      toast('↶ Undone');
-    } catch {}
-  }, [toast]);
-
-  // ── Resize observer for canvas ──────────────────────────────────────────────
-  useEffect(() => {
-    if (screen !== 'survey' || !canvasRef.current) return;
-    const ro = new ResizeObserver(entries => {
-      for (const e of entries) {
-        setCanvasSize({ w: e.contentRect.width, h: e.contentRect.height });
-      }
-    });
-    ro.observe(canvasRef.current);
-    return () => ro.disconnect();
-  }, [screen]);
-
-  // ── Image dims sync (when elevation changes) ────────────────────────────────
-  useEffect(() => {
-    setImgDims({ w: 0, h: 0 });
-    setZoom(1); setPan({ x: 0, y: 0 });
-    setSelectedPin(null);
-  }, [active, project?.id]);
-
-  // ── Active elevation ────────────────────────────────────────────────────────
-  const elev = project?.elevations[active];
-
-  // ── Coords math ─────────────────────────────────────────────────────────────
-  // Image is rendered at "fit" size (contains within canvas), then scaled by zoom + panned.
-  // pin.x and pin.y are stored as fractions [0..1] of the image natural size.
-
-  const fitDims = () => {
-    if (!imgDims.w || !imgDims.h || !canvasSize.w || !canvasSize.h) return { w: 0, h: 0, ox: 0, oy: 0 };
-    const ar = imgDims.w / imgDims.h;
-    const car = canvasSize.w / canvasSize.h;
-    let w, h;
-    if (ar > car) { w = canvasSize.w; h = canvasSize.w / ar; }
-    else { h = canvasSize.h; w = canvasSize.h * ar; }
-    return { w, h, ox: (canvasSize.w - w) / 2, oy: (canvasSize.h - h) / 2 };
-  };
-
-  const eventToImgFrac = (clientX, clientY) => {
-    const c = canvasRef.current;
-    if (!c) return null;
-    const rect = c.getBoundingClientRect();
-    const px = clientX - rect.left;
-    const py = clientY - rect.top;
-    const f = fitDims();
-    if (!f.w) return null;
-    // Reverse the transform: subtract pan, divide by zoom, then convert to image coords
-    const ix = (px - panRef.current.x) / zoomRef.current - f.ox;
-    const iy = (py - panRef.current.y) / zoomRef.current - f.oy;
-    return { fx: ix / f.w, fy: iy / f.h };
-  };
-
-  const fracToScreen = (fx, fy) => {
-    const f = fitDims();
-    if (!f.w) return { x: 0, y: 0 };
-    const ix = fx * f.w + f.ox;
-    const iy = fy * f.h + f.oy;
-    return { x: ix * zoom + pan.x, y: iy * zoom + pan.y };
-  };
-
-  // ── Pin operations ──────────────────────────────────────────────────────────
-  const nextPinId = () => {
-    if (!project) return 1;
-    let max = 0;
-    for (const e of project.elevations) {
-      for (const p of e.pins || []) if (p.id > max) max = p.id;
-      for (const p of e.trash || []) if (p.id > max) max = p.id;
-    }
-    return max + 1;
-  };
-
-  const addPinAt = (fx, fy) => {
-    if (!project) return;
-    pushUndo();
-    const id = nextPinId();
-    const newPin = { id, x: fx, y: fy, createdAt: new Date().toISOString() };
-    const newProject = { ...project, elevations: project.elevations.map((e, i) => i === active ? { ...e, pins: [...(e.pins || []), newPin] } : e) };
-    setProject(newProject);
-    setEditPin(newPin);
-  };
-
-  const updatePin = (updated) => {
-    setProject(p => ({ ...p, elevations: p.elevations.map((e, i) => i === active ? { ...e, pins: e.pins.map(pn => pn.id === updated.id ? updated : pn) } : e) }));
-    setEditPin(null);
-  };
-
-  const movePinTo = (pinId, fx, fy) => {
-    pushUndo();
-    setProject(p => ({ ...p, elevations: p.elevations.map((e, i) => i === active ? { ...e, pins: e.pins.map(pn => pn.id === pinId ? { ...pn, x: fx, y: fy } : pn) } : e) }));
-    movRef.current = null;
-    setMovingPin(null);
-    setMode('pan');
-    toast('✓ Pin moved');
-  };
-
-  const trashPin = (pinId) => {
-    pushUndo();
-    setProject(p => ({ ...p, elevations: p.elevations.map((e, i) => {
-      if (i !== active) return e;
-      const pin = e.pins.find(pn => pn.id === pinId);
-      if (!pin) return e;
-      return { ...e, pins: e.pins.filter(pn => pn.id !== pinId), trash: [...(e.trash || []), { ...pin, deletedAt: new Date().toISOString() }] };
-    }) }));
-    setEditPin(null);
-    setSelectedPin(null);
-    toast('🗑 Moved to trash');
-  };
-
-  const restorePin = (elevIdx, pinId) => {
-    pushUndo();
-    setProject(p => ({ ...p, elevations: p.elevations.map((e, i) => {
-      if (i !== elevIdx) return e;
-      const pin = (e.trash || []).find(pn => pn.id === pinId);
-      if (!pin) return e;
-      const { deletedAt, ...rest } = pin;
-      return { ...e, pins: [...e.pins, rest], trash: e.trash.filter(pn => pn.id !== pinId) };
-    }) }));
-    toast('↩ Restored');
-  };
-
-  const duplicatePin = (pinId) => {
-    if (!project || !elev) return;
-    const orig = elev.pins.find(p => p.id === pinId);
-    if (!orig) return;
-    pushUndo();
-    const newId = nextPinId();
-    // Place the duplicate slightly offset so it doesn't overlap
-    const dup = {
-      ...orig,
-      id: newId,
-      x: Math.min(0.99, orig.x + 0.025),
-      y: Math.min(0.99, orig.y + 0.025),
-      // Reset progress photos and approval state for the new pin
-      surveyPhotoIds: [], fixingPhotoIds: [], donePhotoIds: [],
-      surveyPhotos: undefined, fixingPhotos: undefined, donePhotos: undefined,
-      status: ST.TOREPAIR,
-      approval: 'pending', approvalComment: undefined,
-      fixingComment: undefined, doneComment: undefined,
-      createdAt: new Date().toISOString(),
-      createdBy: user.name,
-      _justDuplicated: true,
-    };
-    setProject(p => ({ ...p, elevations: p.elevations.map((e, i) => i === active ? { ...e, pins: [...e.pins, dup] } : e) }));
-    setEditPin(dup);
-    dupFromRef.current = pinId;
-    toast('⎘ Duplicated — review fields');
-  };
-
-  // ── Add repair type to project's master list ────────────────────────────────
-  const addRepairType = ({ name, type }) => {
+  // Update an elevation by index — debounced persist
+  const upd = (i, fn) => {
     setProject(p => {
-      const exists = (p.repairTypes || []).find(r => r.name === name);
-      if (exists) return p;
-      return { ...p, repairTypes: [...(p.repairTypes || []), { name, type }] };
+      const e = [...p.elevations];
+      e[i] = fn(e[i]);
+      const np = { ...p, elevations: e };
+      persist(np);
+      return np;
     });
   };
 
-  // ── Approval flow ───────────────────────────────────────────────────────────
-  const approvePin = (pinId) => {
-    pushUndo();
-    setProject(p => ({ ...p, elevations: p.elevations.map(e => ({
-      ...e,
-      pins: (e.pins || []).map(pn => pn.id === pinId ? { ...pn, approval: 'approved', approvalComment: undefined } : pn)
-    })) }));
-  };
-
-  const declinePin = (pinId, comment) => {
-    pushUndo();
-    setProject(p => ({ ...p, elevations: p.elevations.map(e => ({
-      ...e,
-      pins: (e.pins || []).map(pn => pn.id === pinId ? { ...pn, approval: 'declined', approvalComment: comment || undefined } : pn)
-    })) }));
-  };
-
-  // ── Touch & mouse: pan / pinch / pin click ──────────────────────────────────
-  // We use a single canvas-level handler. Marker components stop propagation when tapped.
-
-  const onCanvasPointerDown = (e) => {
-    if (modeRef.current === 'pin' && e.button !== undefined && e.button !== 0) return;
-    const c = canvasRef.current;
-    if (!c) return;
-
-    if (e.touches && e.touches.length === 2) {
-      const [t1, t2] = e.touches;
-      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-      pinchRef.current = { startDist: dist, startZoom: zoomRef.current };
-      draggingRef.current = false;
-      return;
-    }
-
-    const cx = e.touches ? e.touches[0].clientX : e.clientX;
-    const cy = e.touches ? e.touches[0].clientY : e.clientY;
-    draggingRef.current = true;
-    dragStartRef.current = {
-      x: cx, y: cy,
-      panX: panRef.current.x, panY: panRef.current.y,
-      moved: false,
-    };
-  };
-
-  const onCanvasPointerMove = (e) => {
-    if (e.touches && e.touches.length === 2 && pinchRef.current) {
-      const [t1, t2] = e.touches;
-      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-      const next = Math.max(0.5, Math.min(5, pinchRef.current.startZoom * (dist / pinchRef.current.startDist)));
-      setZoom(next);
-      return;
-    }
-
-    if (!draggingRef.current) return;
-    const cx = e.touches ? e.touches[0].clientX : e.clientX;
-    const cy = e.touches ? e.touches[0].clientY : e.clientY;
-    const dx = cx - dragStartRef.current.x;
-    const dy = cy - dragStartRef.current.y;
-    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) dragStartRef.current.moved = true;
-
-    if (modeRef.current === 'pan' || modeRef.current === 'move' || modeRef.current === 'delete') {
-      // In all modes except 'pin', dragging the canvas pans
-      if (dragStartRef.current.moved) {
-        setPan({ x: dragStartRef.current.panX + dx, y: dragStartRef.current.panY + dy });
-      }
-    }
-  };
-
-  const onCanvasPointerUp = (e) => {
-    if (e.touches && e.touches.length > 0) return;
-    pinchRef.current = null;
-
-    if (!draggingRef.current) return;
-    draggingRef.current = false;
-
-    if (dragStartRef.current.moved) return;  // it was a drag, not a tap
-
-    // Tap handling
-    const cx = e.changedTouches ? e.changedTouches[0].clientX : e.clientX;
-    const cy = e.changedTouches ? e.changedTouches[0].clientY : e.clientY;
-    const m = modeRef.current;
-    const frac = eventToImgFrac(cx, cy);
-    if (!frac) return;
-
-    if (m === 'pin' && elev?.imgPhotoId) {
-      if (frac.fx >= 0 && frac.fx <= 1 && frac.fy >= 0 && frac.fy <= 1) {
-        addPinAt(frac.fx, frac.fy);
-      }
-    } else if (m === 'move' && movRef.current != null) {
-      movePinTo(movRef.current, frac.fx, frac.fy);
-    }
-  };
-
-  const onMarkerClick = useCallback((pinId) => {
-    const m = modeRef.current;
-    if (m === 'move') {
-      // First tap → select pin to move; second tap on canvas → drop it
-      movRef.current = pinId;
-      setMovingPin(pinId);
-      toast('Tap destination');
-    } else if (m === 'delete') {
-      if (confirm('Delete this pin?')) trashPin(pinId);
-    } else {
-      // Open pin modal
-      const pin = elev?.pins.find(p => p.id === pinId);
-      if (pin) setEditPin(pin);
-    }
-  }, [elev, toast]);
-
-  // ── Wheel zoom on desktop ───────────────────────────────────────────────────
-  const onCanvasWheel = (e) => {
-    if (!canvasRef.current) return;
-    e.preventDefault();
-    const delta = -e.deltaY * 0.002;
-    setZoom(z => Math.max(0.5, Math.min(5, z * (1 + delta))));
-  };
-
-  // ── Keyboard shortcuts ──────────────────────────────────────────────────────
-  useEffect(() => {
-    if (screen !== 'survey') return;
-    const h = (e) => {
-      // Ignore when typing in inputs
-      const tag = (e.target.tagName || '').toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-      if (editPin || showSummary || showTrash || showReview || showRole) return;
-      const k = e.key.toLowerCase();
-      if (k === 'p') setMode('pin');
-      else if (k === 'm') setMode('move');
-      else if (k === 'd') setMode('delete');
-      else if (k === 'v' || k === 'h') setMode('pan');
-      else if (k === 'r') { setZoom(1); setPan({ x: 0, y: 0 }); }
-      else if (k === 's') setShowReview(true);
-      else if (k === 'escape') {
-        setMode('pan');
-        setMovingPin(null);
-        movRef.current = null;
-      }
-      else if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); undo(); }
-    };
-    window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
-  }, [screen, editPin, showSummary, showTrash, showReview, showRole, undo]);
-
-  // ── Upload elevation photo ──────────────────────────────────────────────────
-  const uploadElevationPhoto = async (file) => {
-    if (!file || !project || !elev) return;
-    toast('Processing photo...');
+  // Upload elevation photo
+  const onPhoto = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    showToast('Processing photo...');
     try {
-      // If there was an old photo, schedule deletion (don't await — fire and forget)
-      if (elev.imgPhotoId) deletePhoto(elev.imgPhotoId).catch(() => {});
-
-      const photoId = await processAndStoreElevationPhoto(file, project.id);
-      setProject(p => ({ ...p, elevations: p.elevations.map((e, i) => i === active ? { ...e, imgPhotoId: photoId, img: undefined } : e) }));
-
-      // Read dims from the stored blob
-      const url = URL.createObjectURL(file);
-      const img = new Image();
-      img.onload = () => {
-        setImgDims({ w: img.naturalWidth, h: img.naturalHeight });
-        URL.revokeObjectURL(url);
-      };
-      img.src = url;
-      toast('✓ Photo loaded');
+      // Delete previous photo blob if any
+      if (el?.imgPhotoId) deletePhoto(el.imgPhotoId).catch(() => {});
+      const photoId = await processAndStoreElevationPhoto(f, project.id);
+      upd(ae, el => ({ ...el, imgPhotoId: photoId, img: undefined }));
+      setZoom(1); setPan({ x: 0, y: 0 });
+      showToast('✓ Photo loaded');
     } catch (err) {
       console.error(err);
-      toast('Error loading photo');
+      showToast('Error loading photo');
     }
   };
 
-  // ── Render image dims on load ───────────────────────────────────────────────
-  const onImgLoad = (e) => {
-    const i = e.currentTarget;
-    setImgDims({ w: i.naturalWidth, h: i.naturalHeight });
+  const isClient = user.role === 'client';
+  const canEdit = !isClient;
+  const canPin = canEdit;
+
+  // ── Undo stack ──
+  const pushUndo = (action) => {
+    undoStackRef.current.push(action);
+    if (undoStackRef.current.length > 20) undoStackRef.current.shift();
+  };
+  const undo = () => {
+    const action = undoStackRef.current.pop();
+    if (!action) { showToast('Nothing to undo'); return; }
+    action();
   };
 
-  // ── ROUTING ─────────────────────────────────────────────────────────────────
+  // ── Mode/state refs (avoid stale closures in event handlers) ──
+  const modeRef = useRef(mode); useEffect(() => { modeRef.current = mode; }, [mode]);
+  const movIdRef = useRef(movId); useEffect(() => { movIdRef.current = movId; }, [movId]);
+  const dupFromIdRef = useRef(dupFromId); useEffect(() => { dupFromIdRef.current = dupFromId; }, [dupFromId]);
 
-  if (!user) {
-    return <UserSetup onDone={saveUser}/>;
-  }
+  // ── Coordinate helpers — based on the IMG bounding rect (not manual math) ──
+  const tapCoordsFromClient = (cx, cy) => {
+    const hasImg = !!(el?.imgPhotoId || el?.img);
+    if (hasImg) {
+      const img = iRef.current;
+      if (!img) return null;
+      const r = img.getBoundingClientRect();
+      const x = (cx - r.left) / r.width * 100;
+      const y = (cy - r.top) / r.height * 100;
+      if (x < 0 || x > 100 || y < 0 || y > 100) return null;
+      return { x, y };
+    } else {
+      const c = cRef.current;
+      if (!c) return null;
+      const r = c.getBoundingClientRect();
+      return { x: (cx - r.left) / r.width * 100, y: (cy - r.top) / r.height * 100 };
+    }
+  };
+  const clickCoords = e => tapCoordsFromClient(e.clientX, e.clientY);
 
-  if (screen === 'home') {
+  // Place pin or handle move/duplicate based on current mode
+  const placeOrHandleCoords = coords => {
+    const m = modeRef.current;
+    const mv = movIdRef.current;
+    const dup = dupFromIdRef.current;
+
+    if (dup !== null && canPin) {
+      const source = el?.pins.find(p => p.id === dup);
+      if (!source) { setDupFromId(null); return; }
+      const clone = {
+        ...source,
+        id: nid,
+        x: coords.x, y: coords.y,
+        createdBy: user.name,
+        status: ST.TOREPAIR,
+        approval: 'pending',
+        approvalComment: '',
+        fixingComment: '',
+        doneComment: '',
+        surveyPhotos: [], fixingPhotos: [], donePhotos: [],
+        surveyPhotoIds: [], fixingPhotoIds: [], donePhotoIds: [],
+        _justDuplicated: true,
+      };
+      const elevIdx = ae;
+      const newId = nid;
+      upd(elevIdx, el => ({ ...el, pins: [...el.pins, clone] }));
+      setNid(n => n + 1);
+      setDupFromId(null);
+      setModal(clone);
+      showToast('⎘ Duplicated as pin #' + newId + ' — add new survey photos');
+      pushUndo(() => {
+        upd(elevIdx, el => ({ ...el, pins: el.pins.filter(pi => pi.id !== newId) }));
+        showToast('↶ Undid duplicate #' + newId);
+      });
+      return;
+    }
+
+    if (m === 'pin' && canPin) {
+      const p = {
+        id: nid, x: coords.x, y: coords.y,
+        repairName: '', repairType: 'linear',
+        measurements: {}, comment: '', hazard: 'yellow',
+        status: ST.TOREPAIR, approval: 'pending',
+        createdBy: user.name,
+        surveyPhotoIds: [], fixingPhotoIds: [], donePhotoIds: [],
+      };
+      const elevIdx = ae;
+      const newId = nid;
+      upd(elevIdx, el => ({ ...el, pins: [...el.pins, p] }));
+      setNid(n => n + 1);
+      setModal(p);
+      pushUndo(() => {
+        upd(elevIdx, el => ({ ...el, pins: el.pins.filter(pi => pi.id !== newId) }));
+        showToast('↶ Undid pin #' + newId);
+      });
+    } else if (m === 'move-pin' && mv) {
+      const prevPin = el?.pins.find(p => p.id === mv);
+      const prevPos = prevPin ? { x: prevPin.x, y: prevPin.y } : null;
+      const elevIdx = ae;
+      const movedId = mv;
+      upd(elevIdx, el => ({ ...el, pins: el.pins.map(p => p.id === movedId ? { ...p, ...coords } : p) }));
+      setMovId(null);
+      showToast('✓ Pin #' + movedId + ' repositioned');
+      if (prevPos) {
+        pushUndo(() => {
+          upd(elevIdx, el => ({ ...el, pins: el.pins.map(p => p.id === movedId ? { ...p, ...prevPos } : p) }));
+          showToast('↶ Undid move of pin #' + movedId);
+        });
+      }
+    }
+  };
+
+  // ── Desktop: wheel zoom + mouse drag pan ──
+  const onWheel = e => { e.preventDefault(); setZoom(z => Math.min(8, Math.max(0.3, z * (e.deltaY > 0 ? 0.85 : 1.18)))); };
+  const mouseDragRef = useRef({ dragging: false, sx: 0, sy: 0, spx: 0, spy: 0 });
+  const onMouseDown = e => {
+    if (modeRef.current !== 'pan' || isMobile) return;
+    mouseDragRef.current = { dragging: true, sx: e.clientX, sy: e.clientY, spx: pan_.x, spy: pan_.y };
+  };
+  const onMouseMove = e => {
+    if (!mouseDragRef.current.dragging) return;
+    const d = mouseDragRef.current;
+    setPan({ x: d.spx + (e.clientX - d.sx), y: d.spy + (e.clientY - d.sy) });
+  };
+  const onMouseUp = () => { mouseDragRef.current.dragging = false; };
+  const onCanvasClick = e => {
+    if (mouseDragRef.current.sx !== undefined) {
+      const moved = Math.abs(e.clientX - mouseDragRef.current.sx) > 3 || Math.abs(e.clientY - mouseDragRef.current.sy) > 3;
+      if (moved) { mouseDragRef.current.sx = undefined; return; }
+    }
+    const coords = clickCoords(e);
+    if (coords) placeOrHandleCoords(coords);
+  };
+
+  // ── Keyboard shortcuts (desktop only) ──
+  useEffect(() => {
+    if (isMobile) return;
+    const handler = e => {
+      const tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
+      if (modal || showT || showTrash || showReview || showRole || showMore || showIndex) return;
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return; }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === 'p' && canPin) { e.preventDefault(); setMode('pin'); setMovId(null); }
+      else if (k === 'm' && canEdit) { e.preventDefault(); setMode('move-pin'); }
+      else if (k === 'd' && canEdit) { e.preventDefault(); setMode('delete-pin'); setMovId(null); }
+      else if (k === 'v' || k === 'h') { e.preventDefault(); setMode('pan'); setMovId(null); }
+      else if (k === 'escape') { e.preventDefault(); setMode('pan'); setMovId(null); setSelPin(null); setDupFromId(null); }
+      else if (k === 's') { e.preventDefault(); setShowReview(true); }
+      else if (k === 'r') { e.preventDefault(); setZoom(1); setPan({ x: 0, y: 0 }); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [isMobile, canPin, canEdit, modal, showT, showTrash, showReview, showRole, showMore, showIndex]);
+
+  // ── Touch handlers ──
+  useEffect(() => {
+    const c = cRef.current;
+    if (!c) return;
+    const g = gestureRef.current;
+    const dist = (t1, t2) => { const dx = t1.clientX - t2.clientX, dy = t1.clientY - t2.clientY; return Math.sqrt(dx * dx + dy * dy); };
+    const mid = (t1, t2) => ({ x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 });
+
+    const ts = e => {
+      if (e.touches.length === 1) {
+        const t = e.touches[0];
+        g.panning = (modeRef.current === 'pan');
+        g.pinching = false;
+        g.tapCandidate = true;
+        g.moved = false;
+        g.startX = t.clientX; g.startY = t.clientY;
+        g.startPanX = pan_.x; g.startPanY = pan_.y;
+        g.tapPos = { cx: t.clientX, cy: t.clientY };
+      } else if (e.touches.length === 2) {
+        e.preventDefault();
+        g.panning = false; g.pinching = true; g.tapCandidate = false;
+        g.startDist = dist(e.touches[0], e.touches[1]);
+        g.startZoom = zoom;
+        const m = mid(e.touches[0], e.touches[1]);
+        g.startMidX = m.x; g.startMidY = m.y;
+        g.startPanX = pan_.x; g.startPanY = pan_.y;
+      }
+    };
+    const tm = e => {
+      if (g.pinching && e.touches.length >= 2) {
+        e.preventDefault();
+        const d = dist(e.touches[0], e.touches[1]);
+        const ratio = d / g.startDist;
+        const newZoom = Math.min(8, Math.max(0.3, g.startZoom * ratio));
+        setZoom(newZoom);
+        const m = mid(e.touches[0], e.touches[1]);
+        setPan({ x: g.startPanX + (m.x - g.startMidX), y: g.startPanY + (m.y - g.startMidY) });
+      } else if (g.panning && e.touches.length === 1) {
+        const t = e.touches[0];
+        const dx = t.clientX - g.startX, dy = t.clientY - g.startY;
+        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+          g.moved = true; g.tapCandidate = false;
+          e.preventDefault();
+          setPan({ x: g.startPanX + dx, y: g.startPanY + dy });
+        }
+      }
+    };
+    const te = e => {
+      if (g.tapCandidate && !g.moved && g.tapPos) {
+        const coords = tapCoordsFromClient(g.tapPos.cx, g.tapPos.cy);
+        if (coords) placeOrHandleCoords(coords);
+      }
+      if (e.touches.length === 0) {
+        g.panning = false; g.pinching = false; g.tapCandidate = false; g.moved = false; g.tapPos = null;
+      } else if (e.touches.length === 1 && g.pinching) {
+        g.pinching = false; g.panning = (modeRef.current === 'pan');
+        g.startX = e.touches[0].clientX; g.startY = e.touches[0].clientY;
+        g.startPanX = pan_.x; g.startPanY = pan_.y;
+        g.tapCandidate = false;
+      }
+    };
+
+    c.addEventListener('touchstart', ts, { passive: false });
+    c.addEventListener('touchmove', tm, { passive: false });
+    c.addEventListener('touchend', te, { passive: false });
+    c.addEventListener('touchcancel', te, { passive: false });
+    return () => {
+      c.removeEventListener('touchstart', ts);
+      c.removeEventListener('touchmove', tm);
+      c.removeEventListener('touchend', te);
+      c.removeEventListener('touchcancel', te);
+    };
+  }, [mode, pan_.x, pan_.y, zoom, el?.imgPhotoId, el?.img, nid, movId, ae]);
+
+  // ── Pin click handler ──
+  const onPin = id => {
+    if (dupFromId !== null) {
+      const targetPin = el?.pins.find(p => p.id === id);
+      if (targetPin) placeOrHandleCoords({ x: Math.min(99, targetPin.x + 3), y: targetPin.y });
+      return;
+    }
+    if (mode === 'move-pin') {
+      if (!movId) { setMovId(id); showToast('Tap where to place pin #' + id); }
+      else { setMovId(id); showToast('Now moving pin #' + id); }
+      return;
+    }
+    if (mode === 'delete-pin') {
+      const pin = el.pins.find(p => p.id === id);
+      const name = pin ? pin.repairName || ('Pin #' + id) : 'Pin #' + id;
+      if (!confirm('Move "' + name + '" to trash?')) return;
+      const elevIdx = ae;
+      const pinCopy = { ...pin };
+      upd(elevIdx, el => ({ ...el, pins: el.pins.filter(p => p.id !== id), trash: [...(el.trash || []), { ...pinCopy, deletedAt: new Date().toISOString() }] }));
+      setMode('pan');
+      showToast('🗑 Pin #' + id + ' moved to trash');
+      pushUndo(() => {
+        upd(elevIdx, el => ({ ...el, pins: [...el.pins, pinCopy], trash: (el.trash || []).filter(t => t.id !== id) }));
+        showToast('↶ Restored pin #' + id);
+      });
+      return;
+    }
+    setSelPin(id);
+    const p = el.pins.find(p => p.id === id);
+    if (p) setModal({ ...p });
+  };
+
+  const savePin = u => {
+    upd(ae, el => ({ ...el, pins: el.pins.map(p => p.id === u.id ? u : p) }));
+    setModal(null); setSelPin(null);
+  };
+  const duplicatePin = id => {
+    setModal(null); setSelPin(null);
+    setDupFromId(id);
+    setMode('pan'); setMovId(null);
+    showToast('⎘ Tap on the canvas to place a copy of pin #' + id);
+  };
+  const trashPin = id => {
+    const pin = el.pins.find(p => p.id === id);
+    if (!pin) return;
+    const elevIdx = ae;
+    const pinCopy = { ...pin };
+    upd(elevIdx, el => ({ ...el, pins: el.pins.filter(p => p.id !== id), trash: [...(el.trash || []), { ...pinCopy, deletedAt: new Date().toISOString() }] }));
+    setModal(null); setSelPin(null);
+    showToast('🗑 Pin #' + id + ' moved to trash');
+    pushUndo(() => {
+      upd(elevIdx, el => ({ ...el, pins: [...el.pins, pinCopy], trash: (el.trash || []).filter(t => t.id !== id) }));
+      showToast('↶ Restored pin #' + id);
+    });
+  };
+  const restorePin = (elevIdx, pinId) => {
+    upd(elevIdx, el => {
+      const pin = (el.trash || []).find(p => p.id === pinId);
+      if (!pin) return el;
+      const { deletedAt, ...r } = pin;
+      return { ...el, pins: [...el.pins, r], trash: (el.trash || []).filter(p => p.id !== pinId) };
+    });
+    showToast('✓ Pin restored');
+  };
+  const addRT = r => {
+    const nl = rl.find(x => x.name === r.name) ? rl : [...rl, r];
+    setRl(nl);
+    setProject(p => { const np = { ...p, repairList: nl }; persist(np); return np; });
+  };
+
+  const updateApproval = (pinId, patch, msg) => {
+    setProject(p => {
+      const np = { ...p, elevations: p.elevations.map(el => ({ ...el, pins: el.pins.map(pi => pi.id === pinId ? { ...pi, ...patch } : pi) })) };
+      persist(np);
+      return np;
+    });
+    showToast(msg);
+  };
+  const approvePin = pinId => updateApproval(pinId, { approval: 'approved' }, '✓ Pin #' + pinId + ' approved');
+  const declinePin = (pinId, comment) => updateApproval(pinId, { approval: 'declined', approvalComment: comment || '' }, '✗ Pin #' + pinId + ' declined');
+
+  // ── ROUTING ──
+  if (screen === 'home') return <HomeScreen onOpen={openProject} onCreate={() => setScreen('setup')} user={user} onRoleSwitch={switchRole} onSwitchUser={switchUser} onLogout={logout}/>;
+  if (screen === 'setup') return <Setup onDone={createProject} onBack={() => setScreen('home')}/>;
+
+  // ── SURVEY SCREEN ──
+  const pins = el?.pins || [];
+  const trashCount = project.elevations.reduce((s, e) => s + (e.trash || []).length, 0);
+  const iW = imgDims.w, iH = imgDims.h;
+  const total = project.elevations.reduce((s, e) => s + (e.pins || []).length, 0);
+  const hint = isClient ? '👁 View only' : (dupFromId !== null ? '⎘ Tap on the canvas to place a copy of pin #' + dupFromId : (mode === 'pin' ? (isMobile ? '📍 Tap to place a pin' : '📍 Click to place a pin') : mode === 'move-pin' ? (movId ? 'Moving #' + movId + ' — tap destination' : 'Tap a pin to select it') : mode === 'delete-pin' ? '🗑 Tap a pin to trash it' : (isMobile ? '✋ Drag to pan · pinch to zoom' : '✋ Drag to pan · scroll to zoom')));
+
+  const modes = canEdit ? [
+    { id: 'pan', i: '✋', l: 'Pan / View' },
+    { id: 'pin', i: '📍', l: 'Add Pin' },
+    { id: 'move-pin', i: '↔', l: 'Move Pin' },
+    { id: 'delete-pin', i: '🗑', l: 'Delete Pin', danger: true },
+  ] : [{ id: 'pan', i: '✋', l: 'Pan / View' }];
+
+  const statusCounts = {
+    [ST.TOREPAIR]: pins.filter(p => p.status === ST.TOREPAIR).length,
+    [ST.FIXING]: pins.filter(p => p.status === ST.FIXING).length,
+    [ST.DONE]: pins.filter(p => p.status === ST.DONE).length,
+  };
+
+  // Pin rendering — same percentage math as old version
+  const hasImg = !!(el?.imgPhotoId || el?.img);
+
+  // ─── MOBILE LAYOUT ─────────────────────────────────────────────────────────
+  if (isMobile) {
     return (
-      <>
-        <HomeScreen
-          user={user}
-          onOpen={openProject}
-          onCreate={() => setScreen('setup')}
-          onRoleSwitch={(r) => saveUser({ ...user, role: r })}
-          onSwitchUser={(u) => saveUser({ ...user, name: u.name, company: u.company })}
-          onLogout={() => { localStorage.removeItem(SKEY_USER); setUser(null); }}/>
-        {!online && <OnlineBanner online={false}/>}
-      </>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: C.bg, overflow: 'hidden', userSelect: 'none' }}>
+        {/* Header */}
+        <div style={{ background: C.navyDark, padding: '0 12px', height: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+          <button onClick={goHome} style={{ background: 'none', border: '1px solid #1e3a5f', borderRadius: 6, color: '#94a3b8', fontSize: 16, cursor: 'pointer', padding: '6px 10px', minWidth: 40, minHeight: 36 }}>⌂</button>
+          <div style={{ flex: 1, textAlign: 'center', minWidth: 0, padding: '0 10px' }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#f1f5f9', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'Barlow Condensed', letterSpacing: 0.5 }}>{project.name}</div>
+            <div style={{ fontSize: 9, color: '#475569', fontFamily: 'DM Mono' }}>{user.company} · <span style={{ color: user.role === 'client' ? '#fbbf24' : '#93c5fd' }}>{user.role.toUpperCase()}</span></div>
+          </div>
+          <button onClick={() => setShowIndex(true)} disabled={pins.length === 0} style={{ background: pins.length ? C.blueDim : 'transparent', border: '1px solid ' + (pins.length ? '#1e3a5f' : '#1e3a5f44'), borderRadius: 6, color: pins.length ? '#93c5fd' : '#334155', fontSize: 11, cursor: 'pointer', padding: '6px 10px', minWidth: 40, minHeight: 36, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>≡ {pins.length || ''}</button>
+        </div>
+
+        {/* Elevation tabs */}
+        <div style={{ display: 'flex', background: C.card, borderBottom: '1px solid ' + C.border, overflowX: 'auto', flexShrink: 0 }}>
+          {project.elevations.map((e, i) => {
+            const ep = e.pins || [];
+            const ed = ep.filter(p => p.status === ST.DONE).length;
+            return (
+              <button key={i} onClick={() => { setAe(i); setMode("pan"); setMovId(null); setDupFromId(null); setSelPin(null); setZoom(1); setPan({ x: 0, y: 0 }); }}
+                style={{ padding: '10px 14px', border: 'none', borderBottom: '3px solid ' + (i === ae ? C.navyDark : 'transparent'), background: 'transparent', color: i === ae ? C.navyDark : C.textDim, fontSize: 13, fontWeight: i === ae ? 700 : 400, cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'Barlow Condensed', minHeight: 44 }}>
+                {e.name.toUpperCase()}
+                {ep.length > 0 && <span style={{ fontSize: 10, color: i === ae ? C.navyMid : C.textMuted, background: i === ae ? C.blueDim : '#f3f4f6', padding: '1px 6px', borderRadius: 8, fontFamily: 'DM Mono' }}>{ed}/{ep.length}</span>}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Canvas */}
+        <div ref={cRef} style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#d8dce4', touchAction: 'none' }}>
+          {!hasImg ? (
+            <>
+              <div style={{ position: 'absolute', inset: 0, backgroundImage: 'linear-gradient(' + C.border + ' 1px,transparent 1px),linear-gradient(90deg,' + C.border + ' 1px,transparent 1px)', backgroundSize: '32px 32px', pointerEvents: 'none', opacity: 0.8 }}/>
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, pointerEvents: 'none', padding: 20, textAlign: 'center' }}>
+                <div style={{ fontSize: 48, opacity: 0.15 }}>🏢</div>
+                <div style={{ fontSize: 11, color: C.textMuted, fontFamily: 'Barlow Condensed', letterSpacing: 1 }}>NO PHOTO — TAP ⋯ TO LOAD ONE</div>
+              </div>
+              {pins.map(p => <Marker key={p.id} pin={p} selected={selPin === p.id} isMoving={movId === p.id} isDeleting={mode === 'delete-pin'} onClick={onPin} x={p.x * csz.w / 100} y={p.y * csz.h / 100} currentUser={user.name}/>)}
+            </>
+          ) : (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ transform: 'translate(' + pan_.x + 'px,' + pan_.y + 'px) scale(' + zoom + ')', transformOrigin: 'center center', position: 'relative', display: 'inline-block', willChange: 'transform' }}>
+                {el?.imgPhotoId
+                  ? <ElevationPhotoMobile photoId={el.imgPhotoId} imgRef={iRef} onDimsChange={setImgDims}/>
+                  : <img ref={iRef} src={el.img} alt="" onLoad={e => setImgDims({ w: e.currentTarget.offsetWidth, h: e.currentTarget.offsetHeight })} style={{ display: 'block', maxWidth: '100vw', maxHeight: 'calc(100vh - 200px)', objectFit: 'contain', pointerEvents: 'none' }} draggable={false}/>
+                }
+                <div style={{ position: 'absolute', inset: 0 }}>
+                  {pins.map(p => <Marker key={p.id} pin={p} selected={selPin === p.id} isMoving={movId === p.id} isDeleting={mode === 'delete-pin'} onClick={onPin} x={p.x * iW / 100} y={p.y * iH / 100} currentUser={user.name}/>)}
+                </div>
+              </div>
+            </div>
+          )}
+          <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', background: 'rgba(17,24,39,0.88)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 14, padding: '4px 12px', fontSize: 10, color: mode === 'pin' || mode === 'move-pin' ? '#93c5fd' : mode === 'delete-pin' ? '#fca5a5' : '#94a3b8', pointerEvents: 'none', fontFamily: 'Barlow Condensed', letterSpacing: 0.3, whiteSpace: 'nowrap', maxWidth: '90vw', overflow: 'hidden', textOverflow: 'ellipsis' }}>{hint}</div>
+        </div>
+
+        {/* Bottom toolbar */}
+        <div style={{ background: C.navyDark, borderTop: '1px solid #1e3a5f', display: 'flex', alignItems: 'stretch', flexShrink: 0, height: 58, paddingBottom: 'env(safe-area-inset-bottom)' }}>
+          {modes.map(m => {
+            const active = mode === m.id;
+            const danger = m.danger;
+            const col = active ? (danger ? '#fca5a5' : '#93c5fd') : (danger ? '#64748b' : '#94a3b8');
+            return (
+              <button key={m.id} onClick={() => { setMode(m.id); setDupFromId(null); if (m.id !== 'move-pin') setMovId(null); }}
+                style={{ flex: 1, background: active ? (danger ? 'rgba(220,38,38,0.15)' : 'rgba(37,99,235,0.18)') : 'transparent', border: 'none', borderTop: '2px solid ' + (active ? (danger ? '#dc2626' : C.blue) : 'transparent'), color: col, cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, fontFamily: 'Barlow Condensed', padding: '4px 2px' }}>
+                <span style={{ fontSize: 18, lineHeight: 1 }}>{m.i}</span>
+                <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: 0.5 }}>{m.l.split(' ')[0].toUpperCase()}</span>
+              </button>
+            );
+          })}
+          <div style={{ width: 1, background: '#1e3a5f', margin: '8px 0' }}/>
+          <button onClick={() => setZoom(z => Math.min(8, z * 1.3))} style={{ flex: 0.7, background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 20, fontWeight: 700 }}>+</button>
+          <button onClick={() => setZoom(z => Math.max(0.3, z * 0.77))} style={{ flex: 0.7, background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 20, fontWeight: 700 }}>−</button>
+          <div style={{ width: 1, background: '#1e3a5f', margin: '8px 0' }}/>
+          <button onClick={() => setShowMore(true)} style={{ flex: 0.8, background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, fontFamily: 'Barlow Condensed' }}>
+            <span style={{ fontSize: 18, lineHeight: 1 }}>⋯</span>
+            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: 0.5 }}>MORE</span>
+          </button>
+        </div>
+
+        {/* MORE bottom sheet */}
+        {showMore && (
+          <div onClick={() => setShowMore(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 260, display: 'flex', alignItems: 'flex-end' }}>
+            <div onClick={e => e.stopPropagation()} style={{ background: C.card, width: '100%', borderRadius: '16px 16px 0 0', padding: '10px 16px 20px', paddingBottom: 'calc(20px + env(safe-area-inset-bottom))', boxShadow: '0 -10px 40px rgba(0,0,0,0.2)', maxHeight: '80vh', overflowY: 'auto' }}>
+              <div style={{ width: 40, height: 4, background: C.border, borderRadius: 2, margin: '0 auto 14px' }}/>
+              {canEdit && (
+                <label style={{ display: 'block', padding: '14px', border: '1px dashed ' + C.borderDark, borderRadius: 10, color: C.textDim, fontSize: 13, cursor: 'pointer', textAlign: 'center', background: C.surface, marginBottom: 10, fontFamily: 'Barlow Condensed', fontWeight: 600 }}>
+                  {hasImg ? '🔄 CHANGE ELEVATION PHOTO' : '📷 LOAD ELEVATION PHOTO'}
+                  <input type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={e => { onPhoto(e); setShowMore(false); }}/>
+                </label>
+              )}
+              <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); setShowMore(false); }} style={{ width: '100%', padding: '12px', borderRadius: 10, border: '1px solid ' + C.border, background: C.surface, color: C.textDim, fontSize: 13, fontWeight: 600, cursor: 'pointer', marginBottom: 10, fontFamily: 'Barlow Condensed' }}>⟲ RESET ZOOM ({Math.round(zoom * 100)}%)</button>
+              {pins.length > 0 && (
+                <div style={{ padding: '12px', background: C.surface, border: '1px solid ' + C.border, borderRadius: 10, marginBottom: 10 }}>
+                  <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: 1.5, marginBottom: 8, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>THIS ELEVATION</div>
+                  {[ST.TOREPAIR, ST.FIXING, ST.DONE].map(s => (
+                    <div key={s} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ width: 8, height: 8, borderRadius: '50%', background: SC[s] }}/><span style={{ fontSize: 12, color: C.textDim, fontFamily: 'Barlow Condensed' }}>{SL[s]}</span></div>
+                      <span style={{ fontSize: 13, color: SC[s], fontFamily: 'DM Mono', fontWeight: 700 }}>{statusCounts[s]}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <button onClick={() => { setShowReview(true); setShowMore(false); }} style={{ width: '100%', padding: '13px', borderRadius: 10, border: '1px solid #d97706', background: '#fef3c7', color: '#92400e', fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 8, fontFamily: 'Barlow Condensed' }}>📋 SURVEY REVIEW</button>
+              {!isClient && <button onClick={() => { setShowT(true); setShowMore(false); }} style={{ width: '100%', padding: '13px', borderRadius: 10, border: '1px solid ' + C.blue, background: C.blueDim, color: C.blue, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 8, fontFamily: 'Barlow Condensed' }}>📊 SUMMARY {total > 0 ? '(' + total + ' PINS)' : ''}</button>}
+              {canEdit && <button onClick={() => { setShowTrash(true); setShowMore(false); }} style={{ width: '100%', padding: '13px', borderRadius: 10, border: '1px solid ' + (trashCount > 0 ? '#dc262630' : C.border), background: C.card, color: trashCount > 0 ? '#dc2626aa' : C.textMuted, fontSize: 13, fontWeight: 600, cursor: 'pointer', marginBottom: 8, fontFamily: 'Barlow Condensed' }}>🗑 TRASH {trashCount > 0 ? '(' + trashCount + ')' : ''}</button>}
+              <button onClick={() => { setShowRole(true); setShowMore(false); }} style={{ width: '100%', padding: '13px', borderRadius: 10, border: '1px solid ' + C.border, background: C.card, color: C.textDim, fontSize: 13, fontWeight: 600, cursor: 'pointer', marginBottom: 4, fontFamily: 'Barlow Condensed' }}>👤 {user.name} · {user.role.toUpperCase()} — Switch Role</button>
+            </div>
+          </div>
+        )}
+
+        {/* Pin index drawer */}
+        {showIndex && pins.length > 0 && (
+          <div onClick={() => setShowIndex(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 260, display: 'flex', justifyContent: 'flex-end' }}>
+            <div onClick={e => e.stopPropagation()} style={{ background: C.card, width: '82%', maxWidth: 340, height: '100%', display: 'flex', flexDirection: 'column', boxShadow: '-10px 0 40px rgba(0,0,0,0.2)' }}>
+              <div style={{ padding: '14px 18px', background: C.navyDark, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 13, color: '#f1f5f9', fontFamily: 'Barlow Condensed', fontWeight: 700, letterSpacing: 1.5 }}>PIN INDEX · {pins.length}</span>
+                <button onClick={() => setShowIndex(false)} style={{ background: 'none', border: 'none', color: '#64748b', fontSize: 24, cursor: 'pointer', padding: '0 6px', minWidth: 36, minHeight: 36 }}>×</button>
+              </div>
+              <div style={{ padding: '10px 14px', background: C.surface, borderBottom: '1px solid ' + C.border }}>
+                <input value={indexSearch} onChange={e => setIndexSearch(e.target.value)} placeholder="🔍 Search name, type, status..." style={{ ...IS, padding: '8px 10px', fontSize: 12 }}/>
+              </div>
+              <div style={{ flex: 1, overflowY: 'auto' }}>
+                {(() => {
+                  const q = indexSearch.trim().toLowerCase();
+                  const filtered = q ? pins.filter(p => {
+                    const name = (p.repairName || '').toLowerCase();
+                    const type = (RT.find(r => r.id === p.repairType) || { label: '' }).label.toLowerCase();
+                    const status = (p.approval === 'declined' ? 'declined' : (SL[p.status] || '')).toLowerCase();
+                    const hazard = (HAZARDS.find(h => h.id === p.hazard) || { label: '' }).label.toLowerCase();
+                    const by = (p.createdBy || '').toLowerCase();
+                    return name.includes(q) || type.includes(q) || status.includes(q) || hazard.includes(q) || by.includes(q) || String(p.id).includes(q);
+                  }) : pins;
+                  if (filtered.length === 0) return <div style={{ padding: '24px', textAlign: 'center', color: C.textMuted, fontSize: 12 }}>No pins match "{indexSearch}"</div>;
+                  return filtered.map(p => {
+                    const isDecl = p.approval === 'declined';
+                    const sc = isDecl ? C.declined : (SC[p.status] || C.textMuted);
+                    return (
+                      <div key={p.id} onClick={() => { if (mode !== 'delete-pin') { onPin(p.id); setShowIndex(false); } }} style={{ padding: '14px 18px', borderBottom: '1px solid ' + C.border, cursor: 'pointer', background: isDecl ? '#fef2f2' : (selPin === p.id ? C.blueDim : C.card) }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                          <div style={{ background: pCol(p, user.name), borderRadius: '50%', width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: '#fff', flexShrink: 0, fontFamily: 'DM Mono' }}>{p.id}</div>
+                          <span style={{ fontSize: 14, fontWeight: 600, color: isDecl ? C.declined : C.navyDark, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, fontFamily: 'Barlow Condensed' }}>{p.repairName || 'Unnamed'}</span>
+                        </div>
+                        <div style={{ paddingLeft: 36, display: 'flex', gap: 6, alignItems: 'center' }}>
+                          <div style={{ width: 7, height: 7, borderRadius: '50%', background: sc, flexShrink: 0 }}/>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: sc, fontFamily: 'Barlow Condensed' }}>{isDecl ? 'Declined' : (SL[p.status] || 'new')}</span>
+                          <span style={{ fontSize: 10, color: C.textMuted, fontFamily: 'DM Mono' }}>· {getMeas(p)}</span>
+                          {p.createdBy && p.createdBy !== user.name && <span style={{ fontSize: 9, color: C.textMuted, marginLeft: 'auto' }}>by {p.createdBy}</span>}
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {modal && <Suspense fallback={null}><PinModal key={modal.id + '-' + (modal._justDuplicated ? 'd' : 's')} pin={modal} repairList={rl} onSave={savePin} onTrash={trashPin} onDuplicate={duplicatePin} onClose={() => { setModal(null); setSelPin(null); }} onAddRT={addRT} isMobile={isMobile} user={user} projectId={project.id}/></Suspense>}
+        {showT && <Suspense fallback={null}><SummaryTable project={project} user={user} onClose={() => setShowT(false)} isMobile={isMobile}/></Suspense>}
+        {showTrash && <Suspense fallback={null}><TrashPanel project={project} onRestore={restorePin} onClose={() => setShowTrash(false)}/></Suspense>}
+        {showReview && <Suspense fallback={null}><SurveyReview project={project} user={user} onApprove={approvePin} onDecline={declinePin} onClose={() => setShowReview(false)}/></Suspense>}
+        {showRole && <Suspense fallback={null}><RoleSwitcher user={user} onSwitch={r => { switchRole(r); setShowRole(false); }} onSwitchUser={u => { switchUser(u); setShowRole(false); }} onLogout={logout} onClose={() => setShowRole(false)}/></Suspense>}
+        {!isOnline && <div style={{ position: 'fixed', top: 'calc(env(safe-area-inset-top) + 4px)', left: '50%', transform: 'translateX(-50%)', background: '#dc2626', color: '#fff', fontSize: 10, fontWeight: 700, padding: '3px 10px', borderRadius: 12, zIndex: 600, fontFamily: 'Barlow Condensed', letterSpacing: 1, boxShadow: '0 2px 8px rgba(0,0,0,0.25)' }}>⚠ OFFLINE — saving locally</div>}
+        {toast && <Toast msg={toast}/>}
+      </div>
     );
   }
 
-  if (screen === 'setup') {
-    return <Setup onBack={() => setScreen('home')} onDone={createProject}/>;
-  }
-
-  // ── SURVEY SCREEN ───────────────────────────────────────────────────────────
-
-  const stats = elev ? {
-    total: (elev.pins || []).length,
-    torepair: (elev.pins || []).filter(p => p.status === ST.TOREPAIR).length,
-    fixing: (elev.pins || []).filter(p => p.status === ST.FIXING).length,
-    done: (elev.pins || []).filter(p => p.status === ST.DONE).length,
-  } : { total: 0, torepair: 0, fixing: 0, done: 0 };
-
-  const filteredPins = elev ? (elev.pins || []).filter(p => {
-    if (!searchQ.trim()) return true;
-    const q = searchQ.toLowerCase();
-    return (p.repairName || '').toLowerCase().includes(q) || ('' + p.id).includes(q);
-  }) : [];
-
+  // ─── DESKTOP LAYOUT ────────────────────────────────────────────────────────
   return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: C.bg }}>
-      {/* Header */}
-      <div style={{ background: C.navyDark, padding: '0 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 50, flexShrink: 0, gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
-          <button onClick={goHome} style={{ background: 'rgba(37,99,235,0.15)', border: '1px solid #2563eb44', borderRadius: 6, color: '#93c5fd', cursor: 'pointer', padding: '5px 10px', fontSize: 12, fontFamily: 'Barlow Condensed', fontWeight: 700, flexShrink: 0 }}>← HOME</button>
+    <div style={{ display: 'flex', height: '100%', background: C.bg, overflow: 'hidden', userSelect: 'none' }}>
+      {/* Left sidebar */}
+      <div style={{ width: 200, background: C.surface, borderRight: '1px solid ' + C.border, display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+        <div style={{ background: C.navyDark, padding: '0 14px', height: 56, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontFamily: 'Barlow Condensed', fontSize: 14, fontWeight: 800, color: '#fff', letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{project.name}</div>
-            <div style={{ fontSize: 9, color: '#475569', letterSpacing: 1 }}>{stats.total} PINS · {stats.done} DONE</div>
+            <div style={{ fontSize: 9, color: '#475569', letterSpacing: 2.5, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>QUICK SURVEY</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#f1f5f9', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'Barlow Condensed' }}>{project.name}</div>
           </div>
+          <button onClick={goHome} style={{ background: 'none', border: '1px solid #1e3a5f', borderRadius: 5, color: '#475569', fontSize: 11, cursor: 'pointer', padding: '3px 7px', flexShrink: 0, marginLeft: 6 }}>⌂</button>
         </div>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
-          <button onClick={() => setShowReview(true)} title="Survey review (S)" style={{ background: 'rgba(245,158,11,0.18)', border: '1px solid #f59e0b66', borderRadius: 6, color: '#fbbf24', cursor: 'pointer', padding: '5px 10px', fontSize: 11, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>📋 {isMobile ? '' : 'REVIEW'}</button>
-          {!isMobile && <button onClick={() => setShowSummary(true)} style={{ background: 'rgba(37,99,235,0.18)', border: '1px solid #2563eb66', borderRadius: 6, color: '#93c5fd', cursor: 'pointer', padding: '5px 10px', fontSize: 11, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>📊 SUMMARY</button>}
-          <button onClick={() => setShowRole(true)} style={{ background: 'rgba(139,92,246,0.18)', border: '1px solid #8b5cf666', borderRadius: 6, color: '#c4b5fd', cursor: 'pointer', padding: '5px 10px', fontSize: 10, fontFamily: 'Barlow Condensed', fontWeight: 700, letterSpacing: 1 }}>{user.role.toUpperCase()}</button>
-        </div>
-      </div>
-
-      {/* Elevation tabs */}
-      <div style={{ background: C.card, borderBottom: '1px solid ' + C.border, padding: '0 12px', display: 'flex', gap: 4, overflowX: 'auto', flexShrink: 0, minHeight: 38 }}>
-        {project.elevations.map((e, i) => (
-          <button key={i} onClick={() => setActive(i)}
-            style={{ padding: '8px 12px', border: 'none', background: 'transparent', borderBottom: '2px solid ' + (active === i ? C.blue : 'transparent'), color: active === i ? C.blue : C.textDim, fontSize: 12, fontWeight: active === i ? 700 : 400, cursor: 'pointer', fontFamily: 'Barlow Condensed', whiteSpace: 'nowrap', letterSpacing: 0.5 }}>
-            {e.name} {(e.pins || []).length > 0 && <span style={{ fontSize: 9, marginLeft: 4, opacity: 0.7 }}>({(e.pins || []).length})</span>}
-          </button>
-        ))}
-      </div>
-
-      {/* Main canvas + sidebars */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
-        {/* Desktop left toolbar */}
-        {!isMobile && (
-          <div style={{ width: 64, background: C.card, borderRight: '1px solid ' + C.border, padding: '10px 6px', display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'center', flexShrink: 0 }}>
-            <ModeBtn icon="✋" label="Pan" active={mode === 'pan'} onClick={() => setMode('pan')}/>
-            <ModeBtn icon="📍" label="Pin" active={mode === 'pin'} onClick={() => setMode('pin')}/>
-            <ModeBtn icon="↔" label="Move" active={mode === 'move'} onClick={() => setMode('move')}/>
-            <ModeBtn icon="✕" label="Del" active={mode === 'delete'} onClick={() => setMode('delete')} danger={true}/>
-            <div style={{ height: 1, background: C.border, width: '90%', margin: '6px 0' }}/>
-            <ToolBtn icon="+" label="In" onClick={() => setZoom(z => Math.min(5, z * 1.25))}/>
-            <ToolBtn icon="−" label="Out" onClick={() => setZoom(z => Math.max(0.5, z / 1.25))}/>
-            <ToolBtn icon="⊙" label="Reset" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}/>
-            <div style={{ height: 1, background: C.border, width: '90%', margin: '6px 0' }}/>
-            <ToolBtn icon="↶" label="Undo" onClick={undo}/>
-            <ToolBtn icon="🗑" label="Trash" onClick={() => setShowTrash(true)}/>
-            <div style={{ flex: 1 }}/>
-            <div style={{ fontSize: 8, color: C.textMuted, textAlign: 'center', fontFamily: 'DM Mono', writingMode: 'horizontal-tb', lineHeight: 1.4 }}>
-              <div style={{ color: C.torepair, fontWeight: 700 }}>{stats.torepair}</div>
-              <div>TR</div>
-              <div style={{ color: C.fixing, fontWeight: 700, marginTop: 4 }}>{stats.fixing}</div>
-              <div>FX</div>
-              <div style={{ color: C.done, fontWeight: 700, marginTop: 4 }}>{stats.done}</div>
-              <div>DN</div>
-            </div>
+        {canEdit && (
+          <div style={{ padding: '8px 12px', borderBottom: '1px solid ' + C.border }}>
+            <label style={{ display: 'block', padding: '8px 10px', border: '1px dashed ' + C.borderDark, borderRadius: 7, color: C.textDim, fontSize: 11, cursor: 'pointer', textAlign: 'center', background: C.card }}>
+              {hasImg ? '🔄 Change photo' : '📷 Load photo'}
+              <input type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={onPhoto}/>
+            </label>
           </div>
         )}
+        <div style={{ padding: '8px 12px', borderBottom: '1px solid ' + C.border }}>
+          <div style={{ fontSize: 9, color: C.textMuted, letterSpacing: 1.5, marginBottom: 6, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>MODE</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {modes.map(m => {
+              const active = mode === m.id;
+              const danger = m.danger;
+              return (
+                <button key={m.id} onClick={() => { setMode(m.id); setDupFromId(null); if (m.id !== 'move-pin') setMovId(null); }}
+                  style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid ' + (active ? (danger ? '#dc2626' : C.blue) : C.border), background: active ? (danger ? '#dc262614' : C.blueDim) : C.card, color: active ? (danger ? '#dc2626' : C.blue) : (danger ? '#9ca3af' : C.textDim), fontSize: 12, fontWeight: active ? 700 : 400, cursor: 'pointer', textAlign: 'left', fontFamily: 'Barlow Condensed' }}>
+                  {m.i} {m.l}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div style={{ padding: '8px 12px', borderBottom: '1px solid ' + C.border }}>
+          <div style={{ fontSize: 9, color: C.textMuted, letterSpacing: 1.5, marginBottom: 6, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>ZOOM {Math.round(zoom * 100)}%</div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button onClick={() => setZoom(z => Math.min(8, z * 1.3))} style={{ flex: 1, padding: '5px', borderRadius: 5, border: '1px solid ' + C.border, background: C.card, color: C.textDim, fontSize: 15, cursor: 'pointer' }}>+</button>
+            <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} style={{ flex: 1, padding: '5px', borderRadius: 5, border: '1px solid ' + C.border, background: C.card, color: C.textMuted, fontSize: 9, cursor: 'pointer', fontFamily: 'Barlow Condensed' }}>RESET</button>
+            <button onClick={() => setZoom(z => Math.max(0.3, z * 0.77))} style={{ flex: 1, padding: '5px', borderRadius: 5, border: '1px solid ' + C.border, background: C.card, color: C.textDim, fontSize: 15, cursor: 'pointer' }}>−</button>
+          </div>
+        </div>
+        {pins.length > 0 && (
+          <div style={{ padding: '8px 12px', borderBottom: '1px solid ' + C.border }}>
+            <div style={{ fontSize: 9, color: C.textMuted, letterSpacing: 1.5, marginBottom: 7, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>THIS ELEVATION</div>
+            {[ST.TOREPAIR, ST.FIXING, ST.DONE].map(s => (
+              <div key={s} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}><div style={{ width: 6, height: 6, borderRadius: '50%', background: SC[s] }}/><span style={{ fontSize: 10, color: C.textDim, fontFamily: 'Barlow Condensed' }}>{SL[s]}</span></div>
+                <span style={{ fontSize: 10, color: SC[s], fontFamily: 'DM Mono', fontWeight: 600 }}>{statusCounts[s]}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ padding: '8px 12px', borderBottom: '1px solid ' + C.border }}>
+          <button onClick={() => setShowRole(true)} style={{ width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid ' + C.border, background: C.card, color: C.textDim, fontSize: 11, cursor: 'pointer', fontFamily: 'Barlow Condensed', textAlign: 'left' }}>
+            👤 {user.name} · <span style={{ color: user.role === 'client' ? '#d97706' : C.blue, fontWeight: 700 }}>{user.role.toUpperCase()}</span>
+          </button>
+        </div>
+        <div style={{ flex: 1 }}/>
+        <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid ' + C.border }}>
+          <button onClick={() => setShowReview(true)} style={{ width: '100%', padding: '7px', borderRadius: 7, border: '1px solid #d97706', background: '#fef3c7', color: '#92400e', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'Barlow Condensed' }}>📋 SURVEY REVIEW</button>
+          {!isClient && <button onClick={() => setShowT(true)} style={{ width: '100%', padding: '8px', borderRadius: 7, border: '1px solid ' + C.blue, background: C.blueDim, color: C.blue, fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'Barlow Condensed' }}>📊 SUMMARY {total > 0 ? '(' + total + ')' : ''}</button>}
+          {canEdit && <button onClick={() => setShowTrash(true)} style={{ width: '100%', padding: '7px', borderRadius: 7, border: '1px solid ' + (trashCount > 0 ? '#dc262630' : C.border), background: C.card, color: trashCount > 0 ? '#dc2626aa' : C.textMuted, fontSize: 11, cursor: 'pointer', fontFamily: 'Barlow Condensed' }}>🗑 TRASH {trashCount > 0 ? '(' + trashCount + ')' : ''}</button>}
+        </div>
+      </div>
 
-        {/* Canvas */}
-        <div
-          ref={canvasRef}
-          onMouseDown={onCanvasPointerDown}
-          onMouseMove={onCanvasPointerMove}
-          onMouseUp={onCanvasPointerUp}
-          onMouseLeave={onCanvasPointerUp}
-          onTouchStart={onCanvasPointerDown}
-          onTouchMove={onCanvasPointerMove}
-          onTouchEnd={onCanvasPointerUp}
-          onTouchCancel={onCanvasPointerUp}
-          onWheel={onCanvasWheel}
-          style={{
-            flex: 1, position: 'relative', overflow: 'hidden',
-            background: C.bg,
-            cursor: mode === 'pan' ? 'grab' : mode === 'pin' ? 'crosshair' : mode === 'delete' ? 'not-allowed' : 'pointer',
-            touchAction: 'none',
-          }}
-        >
-          {/* Empty state — upload elevation photo */}
-          {!elev?.imgPhotoId && !elev?.img && (
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
-              <label style={{ background: C.card, border: '2px dashed ' + C.borderDark, borderRadius: 12, padding: '32px 40px', textAlign: 'center', cursor: 'pointer', maxWidth: 400 }}>
-                <div style={{ fontSize: 36, marginBottom: 10 }}>📷</div>
-                <div style={{ fontFamily: 'Barlow Condensed', fontSize: 18, fontWeight: 700, color: C.navyDark, marginBottom: 4 }}>UPLOAD ELEVATION PHOTO</div>
-                <div style={{ fontSize: 12, color: C.textDim }}>{elev?.name}</div>
-                <input type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={e => uploadElevationPhoto(e.target.files[0])}/>
-              </label>
-            </div>
-          )}
-
-          {/* Photo + pins — single scaled container.
-              Image fills the "fit" rect; pins are positioned in image-fraction coords
-              and inverse-scale themselves so they stay the same visual size at any zoom. */}
-          {elev?.imgPhotoId && (() => {
-            const f = fitDims();
+      {/* Main canvas area */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ display: 'flex', background: C.card, borderBottom: '1px solid ' + C.border, overflowX: 'auto', flexShrink: 0 }}>
+          {project.elevations.map((e, i) => {
+            const ep = e.pins || [];
+            const ed = ep.filter(p => p.status === ST.DONE).length;
             return (
-              <div style={{
-                position: 'absolute', left: pan.x, top: pan.y,
-                width: canvasSize.w, height: canvasSize.h,
-                transform: `scale(${zoom})`, transformOrigin: '0 0',
-                pointerEvents: 'none',
-              }}>
-                <div style={{ position: 'absolute', left: f.ox, top: f.oy, width: f.w, height: f.h }}>
-                  <PhotoImg
-                    photoId={elev.imgPhotoId}
-                    style={{ width: '100%', height: '100%', objectFit: 'fill', display: 'block', userSelect: 'none', pointerEvents: 'none' }}/>
-                  <ImgDimsLoader photoId={elev.imgPhotoId} onLoad={(w, h) => { if (w !== imgDims.w || h !== imgDims.h) setImgDims({ w, h }); }}/>
-                  {/* Pins inside the image rect — positioned by image-fraction × image dims */}
-                  <PinsLayer
-                    pins={elev.pins || []}
-                    selectedPinId={selectedPin}
-                    movingPinId={movingPin}
-                    deleteMode={mode === 'delete'}
-                    imgW={f.w}
-                    imgH={f.h}
-                    zoom={zoom}
-                    onMarkerClick={onMarkerClick}
-                    currentUser={user.name}/>
+              <button key={i} onClick={() => { setAe(i); setMode("pan"); setMovId(null); setDupFromId(null); setSelPin(null); setZoom(1); setPan({ x: 0, y: 0 }); }}
+                style={{ padding: '10px 16px', border: 'none', borderBottom: '2px solid ' + (i === ae ? C.navyDark : 'transparent'), background: 'transparent', color: i === ae ? C.navyDark : C.textDim, fontSize: 12, fontWeight: i === ae ? 700 : 400, cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'Barlow Condensed', transition: 'all 0.1s' }}>
+                {e.name.toUpperCase()}
+                {ep.length > 0 && <span style={{ fontSize: 9, color: i === ae ? C.navyMid : C.textMuted, background: i === ae ? C.blueDim : '#f3f4f6', padding: '1px 6px', borderRadius: 8, fontFamily: 'DM Mono' }}>{ed}/{ep.length}</span>}
+                {(e.imgPhotoId || e.img) && <span style={{ fontSize: 8, color: '#16a34a', background: '#dcfce7', padding: '1px 4px', borderRadius: 4 }}>IMG</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ flex: 1, position: 'relative', overflow: 'hidden', cursor: mode === 'pin' || mode === 'move-pin' ? 'crosshair' : mode === 'delete-pin' ? 'not-allowed' : 'grab', background: '#d8dce4' }}
+          ref={cRef} onWheel={onWheel} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onClick={onCanvasClick}>
+          {!hasImg ? (
+            <>
+              <div style={{ position: 'absolute', inset: 0, backgroundImage: 'linear-gradient(' + C.border + ' 1px,transparent 1px),linear-gradient(90deg,' + C.border + ' 1px,transparent 1px)', backgroundSize: '32px 32px', pointerEvents: 'none', opacity: 0.8 }}/>
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, pointerEvents: 'none' }}>
+                <div style={{ fontSize: 48, opacity: 0.1 }}>🏢</div>
+                <div style={{ fontSize: 11, color: C.textMuted, fontFamily: 'Barlow Condensed', letterSpacing: 1 }}>NO PHOTO — PINS FLOAT ON CANVAS</div>
+              </div>
+              {pins.map(p => <Marker key={p.id} pin={p} selected={selPin === p.id} isMoving={movId === p.id} isDeleting={mode === 'delete-pin'} onClick={onPin} x={p.x * csz.w / 100} y={p.y * csz.h / 100} currentUser={user.name}/>)}
+            </>
+          ) : (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ transform: 'translate(' + pan_.x + 'px,' + pan_.y + 'px) scale(' + zoom + ')', transformOrigin: 'center center', position: 'relative', display: 'inline-block' }}>
+                {el?.imgPhotoId
+                  ? <ElevationPhoto photoId={el.imgPhotoId} imgRef={iRef} onDimsChange={setImgDims}/>
+                  : <img ref={iRef} src={el.img} alt="" onLoad={e => setImgDims({ w: e.currentTarget.offsetWidth, h: e.currentTarget.offsetHeight })} style={{ display: 'block', maxWidth: '72vw', maxHeight: '88vh', objectFit: 'contain', pointerEvents: 'none' }} draggable={false}/>
+                }
+                <div style={{ position: 'absolute', inset: 0 }}>
+                  {pins.map(p => <Marker key={p.id} pin={p} selected={selPin === p.id} isMoving={movId === p.id} isDeleting={mode === 'delete-pin'} onClick={onPin} x={p.x * iW / 100} y={p.y * iH / 100} currentUser={user.name}/>)}
                 </div>
               </div>
-            );
-          })()}
-
-          {/* Legacy fallback for old base64 elevation photos */}
-          {!elev?.imgPhotoId && elev?.img && (
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <img src={elev.img} onLoad={onImgLoad} style={{ maxWidth: '100%', maxHeight: '100%', display: 'block', userSelect: 'none', pointerEvents: 'none' }} alt=""/>
             </div>
           )}
-
-          {/* Mode badge */}
-          {mode !== 'pan' && (
-            <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', background: mode === 'pin' ? C.blue : mode === 'move' ? '#ea580c' : '#dc2626', color: '#fff', padding: '5px 14px', borderRadius: 16, fontSize: 11, fontFamily: 'Barlow Condensed', fontWeight: 700, letterSpacing: 1.5, boxShadow: '0 2px 12px rgba(0,0,0,0.2)', pointerEvents: 'none' }}>
-              {mode === 'pin' && '📍 TAP TO PLACE'}
-              {mode === 'move' && (movingPin ? '📍 TAP DESTINATION' : '↔ TAP A PIN')}
-              {mode === 'delete' && '✕ TAP A PIN TO DELETE'}
-            </div>
-          )}
-
-          {/* Online indicator */}
-          {!online && (
-            <div style={{ position: 'absolute', top: 10, right: 10, background: '#ea580c', color: '#fff', padding: '4px 10px', borderRadius: 12, fontSize: 10, fontFamily: 'Barlow Condensed', fontWeight: 700, letterSpacing: 1 }}>OFFLINE</div>
-          )}
+          <div style={{ position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)', background: 'rgba(17,24,39,0.88)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 20, padding: '5px 16px', fontSize: 11, color: mode === 'pin' || mode === 'move-pin' ? '#93c5fd' : mode === 'delete-pin' ? '#fca5a5' : '#94a3b8', pointerEvents: 'none', fontFamily: 'Barlow Condensed', letterSpacing: 0.5 }}>{hint}</div>
+          <div style={{ position: 'absolute', top: 12, left: 12, background: 'rgba(17,24,39,0.88)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 7, padding: '4px 12px', fontSize: 10, color: '#93c5fd', fontWeight: 700, letterSpacing: 2, pointerEvents: 'none', fontFamily: 'Barlow Condensed' }}>{(el?.name || '').toUpperCase()} · {project.name.toUpperCase()}</div>
         </div>
-
-        {/* Desktop right sidebar — pin index */}
-        {!isMobile && elev && (
-          <div style={{ width: 240, background: C.card, borderLeft: '1px solid ' + C.border, display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
-            <div style={{ padding: '10px 12px', borderBottom: '1px solid ' + C.border }}>
-              <div style={{ fontSize: 10, color: C.textMuted, letterSpacing: 1.5, fontFamily: 'Barlow Condensed', fontWeight: 700, marginBottom: 6 }}>PINS ({(elev.pins || []).length})</div>
-              <input value={searchQ} onChange={e => setSearchQ(e.target.value)} placeholder="Search..." style={{ width: '100%', background: C.surface, border: '1px solid ' + C.border, borderRadius: 6, padding: '5px 9px', fontSize: 12, outline: 'none' }}/>
-            </div>
-            <div style={{ flex: 1, overflowY: 'auto', padding: '6px 8px' }}>
-              {filteredPins.length === 0 && <div style={{ textAlign: 'center', color: C.textMuted, fontSize: 11, padding: 20 }}>No pins</div>}
-              {filteredPins.map(p => (
-                <PinIndexRow key={p.id} pin={p} onClick={() => setEditPin(p)} currentUser={user.name}/>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
 
-      {/* Mobile bottom toolbar */}
-      {isMobile && (
-        <div style={{ background: C.card, borderTop: '1px solid ' + C.border, padding: '6px 8px', display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0, paddingBottom: 'calc(6px + env(safe-area-inset-bottom))' }}>
-          <MobileBtn icon="✋" active={mode === 'pan'} onClick={() => setMode('pan')}/>
-          <MobileBtn icon="📍" active={mode === 'pin'} onClick={() => setMode('pin')}/>
-          <MobileBtn icon="↔" active={mode === 'move'} onClick={() => setMode('move')}/>
-          <MobileBtn icon="✕" active={mode === 'delete'} onClick={() => setMode('delete')} danger={true}/>
-          <div style={{ width: 1, height: 24, background: C.border }}/>
-          <MobileBtn icon="−" onClick={() => setZoom(z => Math.max(0.5, z / 1.25))}/>
-          <MobileBtn icon="+" onClick={() => setZoom(z => Math.min(5, z * 1.25))}/>
-          <MobileBtn icon="≡" onClick={() => setShowIndex(true)} badge={(elev?.pins || []).length}/>
-          <MobileBtn icon="⋯" onClick={() => setShowMore(true)}/>
-        </div>
-      )}
-
-      {/* Mobile pin index drawer */}
-      {isMobile && showIndex && elev && (
-        <div onClick={() => setShowIndex(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 150 }}>
-          <div onClick={e => e.stopPropagation()} style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 280, maxWidth: '85vw', background: C.card, display: 'flex', flexDirection: 'column' }}>
-            <div style={{ padding: '12px 14px', borderBottom: '1px solid ' + C.border, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: C.navyDark, fontFamily: 'Barlow Condensed' }}>PINS ({(elev.pins || []).length})</div>
-              <button onClick={() => setShowIndex(false)} style={{ background: 'none', border: 'none', color: C.textDim, fontSize: 20, cursor: 'pointer' }}>×</button>
-            </div>
-            <div style={{ padding: '8px 14px', borderBottom: '1px solid ' + C.border }}>
-              <input value={searchQ} onChange={e => setSearchQ(e.target.value)} placeholder="Search..." style={{ width: '100%', background: C.surface, border: '1px solid ' + C.border, borderRadius: 6, padding: '6px 10px', fontSize: 12, outline: 'none' }}/>
-            </div>
-            <div style={{ flex: 1, overflowY: 'auto', padding: '6px 8px' }}>
-              {filteredPins.length === 0 && <div style={{ textAlign: 'center', color: C.textMuted, fontSize: 11, padding: 20 }}>No pins</div>}
-              {filteredPins.map(p => (
-                <PinIndexRow key={p.id} pin={p} onClick={() => { setEditPin(p); setShowIndex(false); }} currentUser={user.name}/>
-              ))}
-            </div>
+      {/* Right sidebar — pin index */}
+      {pins.length > 0 && (
+        <div style={{ width: 196, background: C.surface, borderLeft: '1px solid ' + C.border, display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+          <div style={{ padding: '10px 14px', borderBottom: '1px solid ' + C.border, display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: C.navyDark }}>
+            <span style={{ fontSize: 9, color: '#475569', letterSpacing: 2, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>INDEX</span>
+            <span style={{ fontSize: 9, color: '#475569', fontFamily: 'DM Mono' }}>{pins.length}</span>
+          </div>
+          <div style={{ padding: '6px 8px', background: C.card, borderBottom: '1px solid ' + C.border }}>
+            <input value={indexSearch} onChange={e => setIndexSearch(e.target.value)} placeholder="🔍 Search..." style={{ ...IS, padding: '5px 8px', fontSize: 11 }}/>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+            {(() => {
+              const q = indexSearch.trim().toLowerCase();
+              const filtered = q ? pins.filter(p => {
+                const name = (p.repairName || '').toLowerCase();
+                const type = (RT.find(r => r.id === p.repairType) || { label: '' }).label.toLowerCase();
+                const status = (p.approval === 'declined' ? 'declined' : (SL[p.status] || '')).toLowerCase();
+                const hazard = (HAZARDS.find(h => h.id === p.hazard) || { label: '' }).label.toLowerCase();
+                const by = (p.createdBy || '').toLowerCase();
+                return name.includes(q) || type.includes(q) || status.includes(q) || hazard.includes(q) || by.includes(q) || String(p.id).includes(q);
+              }) : pins;
+              if (filtered.length === 0) return <div style={{ padding: '16px', textAlign: 'center', color: C.textMuted, fontSize: 11 }}>No matches</div>;
+              return filtered.map(p => {
+                const isDecl = p.approval === 'declined';
+                const sc = isDecl ? C.declined : (SC[p.status] || C.textMuted);
+                return (
+                  <div key={p.id} onClick={() => { if (mode !== 'delete-pin') onPin(p.id); }} style={{ padding: '9px 14px', borderBottom: '1px solid ' + C.border, cursor: 'pointer', background: isDecl ? '#fef2f2' : (selPin === p.id ? C.blueDim : C.card), transition: 'background 0.1s' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 3 }}>
+                      <div style={{ background: pCol(p, user.name), borderRadius: '50%', width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 700, color: '#fff', flexShrink: 0, fontFamily: 'DM Mono' }}>{p.id}</div>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: isDecl ? C.declined : C.navyDark, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, fontFamily: 'Barlow Condensed' }}>{p.repairName || 'Unnamed'}</span>
+                    </div>
+                    <div style={{ paddingLeft: 25, display: 'flex', gap: 5, alignItems: 'center' }}>
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: sc, flexShrink: 0 }}/>
+                      <span style={{ fontSize: 9, fontWeight: 700, color: sc, fontFamily: 'Barlow Condensed' }}>{isDecl ? 'Declined' : (SL[p.status] || 'new')}</span>
+                      {p.hazard && <span style={{ fontSize: 9, color: HC[p.hazard], marginLeft: 'auto' }}>●</span>}
+                    </div>
+                  </div>
+                );
+              });
+            })()}
           </div>
         </div>
       )}
 
-      {/* Mobile more menu */}
-      {isMobile && showMore && (
-        <div onClick={() => setShowMore(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 150, display: 'flex', alignItems: 'flex-end' }}>
-          <div onClick={e => e.stopPropagation()} style={{ width: '100%', background: C.card, borderRadius: '14px 14px 0 0', padding: '12px 14px 24px', paddingBottom: 'calc(24px + env(safe-area-inset-bottom))' }}>
-            <div style={{ fontSize: 11, color: C.textMuted, letterSpacing: 1.5, marginBottom: 10, fontFamily: 'Barlow Condensed', fontWeight: 700, textAlign: 'center' }}>MORE</div>
-            <button onClick={() => { setShowMore(false); setShowSummary(true); }} style={mobMenuBtn}>📊 Summary table</button>
-            <button onClick={() => { setShowMore(false); setShowTrash(true); }} style={mobMenuBtn}>🗑 Trash</button>
-            <button onClick={() => { setShowMore(false); undo(); }} style={mobMenuBtn}>↶ Undo last action</button>
-            <button onClick={() => { setShowMore(false); setZoom(1); setPan({ x: 0, y: 0 }); }} style={mobMenuBtn}>⊙ Reset zoom</button>
-            <button onClick={() => setShowMore(false)} style={{ ...mobMenuBtn, color: C.textMuted, marginTop: 6 }}>Close</button>
-          </div>
-        </div>
-      )}
-
-      {/* Modals */}
-      {editPin && (
-        <Suspense fallback={null}>
-          <PinModal
-            pin={editPin}
-            repairList={project.repairTypes || []}
-            onSave={updatePin}
-            onTrash={trashPin}
-            onDuplicate={duplicatePin}
-            onClose={() => setEditPin(null)}
-            onAddRT={addRepairType}
-            isMobile={isMobile}
-            user={user}
-            projectId={project.id}/>
-        </Suspense>
-      )}
-
-      {showSummary && (
-        <Suspense fallback={null}>
-          <SummaryTable project={project} user={user} onClose={() => setShowSummary(false)} isMobile={isMobile}/>
-        </Suspense>
-      )}
-
-      {showTrash && (
-        <Suspense fallback={null}>
-          <TrashPanel project={project} onRestore={(ei, id) => restorePin(ei, id)} onClose={() => setShowTrash(false)}/>
-        </Suspense>
-      )}
-
-      {showReview && (
-        <Suspense fallback={null}>
-          <SurveyReview project={project} user={user} onApprove={approvePin} onDecline={declinePin} onClose={() => setShowReview(false)}/>
-        </Suspense>
-      )}
-
-      {showRole && (
-        <Suspense fallback={null}>
-          <RoleSwitcher
-            user={user}
-            onSwitch={r => { saveUser({ ...user, role: r }); setShowRole(false); }}
-            onSwitchUser={u => { saveUser({ ...user, name: u.name, company: u.company }); setShowRole(false); }}
-            onLogout={() => { localStorage.removeItem(SKEY_USER); setUser(null); setShowRole(false); }}
-            onClose={() => setShowRole(false)}/>
-        </Suspense>
-      )}
-
-      {showToast && <Toast msg={showToast}/>}
-      {!online && screen === 'survey' && <OnlineBanner online={false}/>}
+      {modal && <Suspense fallback={null}><PinModal key={modal.id + '-' + (modal._justDuplicated ? 'd' : 's')} pin={modal} repairList={rl} onSave={savePin} onTrash={trashPin} onDuplicate={duplicatePin} onClose={() => { setModal(null); setSelPin(null); }} onAddRT={addRT} isMobile={false} user={user} projectId={project.id}/></Suspense>}
+      {showT && <Suspense fallback={null}><SummaryTable project={project} user={user} onClose={() => setShowT(false)} isMobile={false}/></Suspense>}
+      {showTrash && <Suspense fallback={null}><TrashPanel project={project} onRestore={restorePin} onClose={() => setShowTrash(false)}/></Suspense>}
+      {showReview && <Suspense fallback={null}><SurveyReview project={project} user={user} onApprove={approvePin} onDecline={declinePin} onClose={() => setShowReview(false)}/></Suspense>}
+      {showRole && <Suspense fallback={null}><RoleSwitcher user={user} onSwitch={r => { switchRole(r); setShowRole(false); }} onSwitchUser={u => { switchUser(u); setShowRole(false); }} onLogout={logout} onClose={() => setShowRole(false)}/></Suspense>}
+      {!isOnline && <div style={{ position: 'fixed', top: 'calc(env(safe-area-inset-top) + 4px)', left: '50%', transform: 'translateX(-50%)', background: '#dc2626', color: '#fff', fontSize: 10, fontWeight: 700, padding: '3px 10px', borderRadius: 12, zIndex: 600, fontFamily: 'Barlow Condensed', letterSpacing: 1, boxShadow: '0 2px 8px rgba(0,0,0,0.25)' }}>⚠ OFFLINE — saving locally</div>}
+      {toast && <Toast msg={toast}/>}
     </div>
   );
-}
-
-// ── Helper subcomponents (kept inline since they're trivial) ──────────────────
-
-function ModeBtn({ icon, label, active, onClick, danger }) {
-  const col = danger ? '#dc2626' : C.blue;
-  return (
-    <button onClick={onClick} style={{ width: 50, padding: '8px 4px', borderRadius: 8, border: '1.5px solid ' + (active ? col : C.border), background: active ? col + '14' : C.surface, color: active ? col : C.textDim, cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-      <span style={{ fontSize: 16 }}>{icon}</span>
-      <span style={{ fontSize: 9, fontFamily: 'Barlow Condensed', letterSpacing: 0.5, fontWeight: active ? 700 : 400 }}>{label}</span>
-    </button>
-  );
-}
-
-function ToolBtn({ icon, label, onClick }) {
-  return (
-    <button onClick={onClick} style={{ width: 50, padding: '6px 4px', borderRadius: 6, border: '1px solid ' + C.border, background: 'transparent', color: C.textDim, cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-      <span style={{ fontSize: 14 }}>{icon}</span>
-      <span style={{ fontSize: 8, fontFamily: 'Barlow Condensed' }}>{label}</span>
-    </button>
-  );
-}
-
-function MobileBtn({ icon, onClick, active, danger, badge }) {
-  const col = danger ? '#dc2626' : C.blue;
-  return (
-    <button onClick={onClick} style={{ flex: 1, padding: '8px 0', borderRadius: 8, border: '1px solid ' + (active ? col : 'transparent'), background: active ? col + '14' : 'transparent', color: active ? col : C.textDim, cursor: 'pointer', fontSize: 18, position: 'relative', minHeight: 38 }}>
-      {icon}
-      {badge != null && badge > 0 && <span style={{ position: 'absolute', top: 2, right: 4, background: C.blue, color: '#fff', borderRadius: 8, fontSize: 9, padding: '1px 5px', minWidth: 14, fontFamily: 'DM Mono', fontWeight: 700 }}>{badge}</span>}
-    </button>
-  );
-}
-
-const mobMenuBtn = { width: '100%', padding: '12px', border: '1px solid ' + C.border, background: C.card, borderRadius: 8, color: C.navyDark, fontSize: 14, cursor: 'pointer', textAlign: 'left', fontFamily: 'Barlow Condensed', fontWeight: 600, marginBottom: 4 };
-
-function PinIndexRow({ pin, onClick, currentUser }) {
-  return (
-    <div onClick={onClick} style={{ padding: '6px 8px', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 7, marginBottom: 2 }}
-      onMouseEnter={e => e.currentTarget.style.background = C.surface} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-      <div style={{ background: pCol(pin, currentUser), borderRadius: '50%', width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 700, color: '#fff', fontFamily: 'DM Mono', flexShrink: 0 }}>{pin.id}</div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: C.navyDark, fontFamily: 'Barlow Condensed', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pin.repairName || 'Unnamed'}</div>
-        <div style={{ fontSize: 9, color: C.textMuted, fontFamily: 'DM Mono' }}>{getMeas(pin)}</div>
-      </div>
-      <div style={{ width: 6, height: 6, borderRadius: '50%', background: SC[pin.status] || C.border, flexShrink: 0 }}/>
-    </div>
-  );
-}
-
-function OnlineBanner({ online }) {
-  if (online) return null;
-  return (
-    <div style={{ position: 'fixed', top: 'env(safe-area-inset-top)', left: '50%', transform: 'translateX(-50%)', background: '#ea580c', color: '#fff', padding: '4px 14px', fontSize: 10, fontFamily: 'Barlow Condensed', fontWeight: 700, letterSpacing: 1.5, borderRadius: '0 0 8px 8px', zIndex: 1000 }}>● OFFLINE</div>
-  );
-}
-
-// Pins layer — pins live INSIDE the image rect.
-// Each pin is positioned at (frac.x * imgW, frac.y * imgH).
-// Each marker uses translateZ(0) and inverse-scales itself so it stays
-// constant visual size regardless of the parent zoom.
-function PinsLayer({ pins, selectedPinId, movingPinId, deleteMode, imgW, imgH, zoom, onMarkerClick, currentUser }) {
-  return (
-    <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-      {pins.map(pin => (
-        <div
-          key={pin.id}
-          style={{
-            position: 'absolute',
-            left: pin.x * imgW,
-            top: pin.y * imgH,
-            // Inverse-scale so the pin stays the same visual size when zoomed
-            transform: `scale(${1 / zoom})`,
-            transformOrigin: 'center top',
-            pointerEvents: 'auto',
-          }}
-        >
-          <Marker
-            pin={pin}
-            x={0}
-            y={0}
-            selected={selectedPinId === pin.id}
-            isMoving={movingPinId === pin.id}
-            isDeleting={deleteMode}
-            onClick={onMarkerClick}
-            currentUser={currentUser}/>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// Loads photo blob just to read its natural dims into App state
-function ImgDimsLoader({ photoId, onLoad }) {
-  const [url, setUrl] = useState(null);
-  useEffect(() => {
-    let cancelled = false;
-    getPhotoUrl(photoId).then(u => { if (!cancelled) setUrl(u); });
-    return () => { cancelled = true; };
-  }, [photoId]);
-  if (!url) return null;
-  return <img src={url} style={{ display: 'none' }} onLoad={e => onLoad(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)} alt=""/>;
 }
