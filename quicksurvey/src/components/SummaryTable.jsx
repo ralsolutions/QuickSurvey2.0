@@ -59,17 +59,23 @@ export function SummaryTable({ project, onClose, user }) {
   const types = [...new Set(allPins.map(p => p.repairType))].filter(Boolean);
   const filtered = filter === 'all' ? allPins : allPins.filter(p => p.repairType === filter);
 
+  // Build pricing buckets — DECLINED pins are tracked separately so they don't pollute the total
   const totalsMap = {};
+  const declinedMap = {};
   filtered.forEach(pin => {
     const r = RT.find(r => r.id === pin.repairType); if (!r) return;
     const key = pin.repairName + '__' + pin.repairType;
-    if (!totalsMap[key]) totalsMap[key] = { repairName: pin.repairName, typeLabel: r.label, unit: r.unit, vals: [], count: 0 };
-    totalsMap[key].count++;
+    const isDecl = pin.approval === 'declined';
+    const target = isDecl ? declinedMap : totalsMap;
+    if (!target[key]) target[key] = { repairName: pin.repairName, typeLabel: r.label, unit: r.unit, vals: [], count: 0 };
+    target[key].count++;
     const num = parseFloat(r.calc(pin.measurements || {}));
-    if (!isNaN(num) && num > 0) totalsMap[key].vals.push(num);
+    if (!isNaN(num) && num > 0) target[key].vals.push(num);
   });
 
+  // Grand total only counts approved/pending — declined are excluded
   const grandTotal = Object.entries(totalsMap).reduce((s, [, v]) => { const q = v.vals.reduce((a, b) => a + b, 0); const p = parseFloat(prices[v.repairName] || 0); return s + q * p; }, 0);
+  const declinedCount = filtered.filter(p => p.approval === 'declined').length;
 
   const TH = { padding: '9px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: '#94a3b8', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap', letterSpacing: 1, fontFamily: 'Barlow Condensed' };
   const TD = { padding: '9px 12px', fontSize: 12, borderBottom: '1px solid ' + C.border, verticalAlign: 'middle' };
@@ -193,7 +199,7 @@ export function SummaryTable({ project, onClose, user }) {
               </div>
             );
           })}
-          {Object.keys(totalsMap).length > 0 && canPrice && (
+          {(Object.keys(totalsMap).length > 0 || Object.keys(declinedMap).length > 0) && canPrice && (
             <div style={{ padding: '16px', background: C.card, border: '1px solid ' + C.border, borderRadius: 10, boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
               <div style={{ fontSize: 10, color: C.textDim, letterSpacing: 1.5, marginBottom: 12, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>QUANTITIES & PRICING</div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(200px,1fr))', gap: 10 }}>
@@ -217,9 +223,29 @@ export function SummaryTable({ project, onClose, user }) {
                   );
                 })}
               </div>
+              {/* Show declined repairs separately — informational only, NOT counted in total */}
+              {Object.keys(declinedMap).length > 0 && (
+                <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px dashed #fecaca' }}>
+                  <div style={{ fontSize: 10, color: C.declined, letterSpacing: 1.5, marginBottom: 8, fontFamily: 'Barlow Condensed', fontWeight: 700 }}>
+                    ✗ DECLINED — NOT INCLUDED IN TOTAL ({declinedCount})
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(200px,1fr))', gap: 10 }}>
+                    {Object.entries(declinedMap).map(([k, v]) => {
+                      const qty = v.vals.reduce((a, b) => a + b, 0);
+                      return (
+                        <div key={k} style={{ background: '#fef2f2', borderRadius: 9, padding: '10px 12px', border: '1px solid #fecaca', opacity: 0.85 }}>
+                          <div style={{ fontSize: 13, color: C.declined, fontWeight: 700, fontFamily: 'Barlow Condensed', marginBottom: 1, textDecoration: 'line-through', textDecorationColor: '#dc262666' }}>{v.repairName}</div>
+                          <div style={{ fontSize: 9, color: '#dc262699', fontFamily: 'DM Mono', marginBottom: 4 }}>{v.typeLabel} · {v.count} declined item{v.count !== 1 ? 's' : ''}</div>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: C.declined, fontFamily: 'Barlow Condensed', textDecoration: 'line-through', textDecorationColor: '#dc262666' }}>{qty > 0 ? qty.toFixed(3) : 0} <span style={{ fontSize: 9 }}>{v.unit}</span></div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               {grandTotal > 0 && (
                 <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid ' + C.border, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 16 }}>
-                  <div style={{ fontSize: 12, color: C.textDim }}>Grand total estimate</div>
+                  <div style={{ fontSize: 12, color: C.textDim }}>Grand total estimate{declinedCount > 0 ? ' (declined excluded)' : ''}</div>
                   <div style={{ fontFamily: 'Barlow Condensed', fontSize: 30, fontWeight: 800, color: C.navyDark }}>$ {grandTotal.toLocaleString('en-NZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                 </div>
               )}
