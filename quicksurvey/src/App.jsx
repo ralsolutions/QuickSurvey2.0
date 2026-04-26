@@ -180,8 +180,6 @@ export default function App({ onReady }) {
   const switchUser = u => saveUser({ ...user, name: u.name, company: u.company });
   const logout = () => { localStorage.removeItem(SKEY_USER); setUser(null); setScreen('home'); setProject(null); };
 
-  if (!user) return <UserSetup onDone={u => saveUser(u)}/>;
-
   const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 2200); };
   const persist = p => persistDebounced(p);
   const persistNow = p => { persistFlush(p); };
@@ -253,7 +251,7 @@ export default function App({ onReady }) {
     }
   };
 
-  const isClient = user.role === 'client';
+  const isClient = user?.role === 'client';
   const canEdit = !isClient;
   const canPin = canEdit;
 
@@ -565,6 +563,7 @@ export default function App({ onReady }) {
   const declinePin = (pinId, comment) => updateApproval(pinId, { approval: 'declined', approvalComment: comment || '' }, '✗ Pin #' + pinId + ' declined');
 
   // ── ROUTING ──
+  if (!user) return <UserSetup onDone={u => saveUser(u)}/>;
   if (screen === 'home') return <HomeScreen onOpen={openProject} onCreate={() => setScreen('setup')} user={user} onRoleSwitch={switchRole} onSwitchUser={switchUser} onLogout={logout}/>;
   if (screen === 'setup') return <Setup onDone={createProject} onBack={() => setScreen('home')}/>;
 
