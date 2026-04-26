@@ -82,10 +82,21 @@ export function PinModal({ pin, repairList, onSave, onTrash, onDuplicate, onClos
         </div>
       )}
       {staging.length < MAX && (
-        <label style={{ display: 'block', padding: '11px', border: '1px dashed ' + C.borderDark, borderRadius: 8, textAlign: 'center', color: C.textDim, fontSize: 12, cursor: 'pointer', background: C.surface }}>
-          📷 {label} ({staging.length}/{MAX})
-          <input type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={e => addPhotos(e.target.files)}/>
-        </label>
+        <>
+          <div style={{ fontSize: 11, color: C.textDim, marginBottom: 6, textAlign: 'center' }}>{label} ({staging.length}/{MAX})</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {/* Camera button — capture="environment" forces the rear camera directly on iOS */}
+            <label style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '12px 8px', border: '1.5px solid ' + C.blueBorder, borderRadius: 8, color: C.blue, fontSize: 12, fontWeight: 700, cursor: 'pointer', background: C.blueDim, fontFamily: 'Barlow Condensed', letterSpacing: 0.5 }}>
+              📷 CAMERA
+              <input type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={e => addPhotos(e.target.files)}/>
+            </label>
+            {/* Gallery button — no capture attribute → opens photo library */}
+            <label style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '12px 8px', border: '1.5px solid ' + C.border, borderRadius: 8, color: C.textDim, fontSize: 12, fontWeight: 700, cursor: 'pointer', background: C.surface, fontFamily: 'Barlow Condensed', letterSpacing: 0.5 }}>
+              🖼 GALLERY
+              <input type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={e => addPhotos(e.target.files)}/>
+            </label>
+          </div>
+        </>
       )}
       {staging.length >= MIN && <div style={{ fontSize: 10, color: C.done, marginTop: 4, textAlign: 'center' }}>✓ Ready</div>}
     </div>
