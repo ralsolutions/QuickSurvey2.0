@@ -399,10 +399,19 @@ export default function App() {
             <div onClick={e => e.stopPropagation()} style={{ background: C.card, width: '100%', borderRadius: '16px 16px 0 0', padding: '10px 16px 20px', paddingBottom: 'calc(20px + env(safe-area-inset-bottom))', boxShadow: '0 -10px 40px rgba(0,0,0,0.2)', maxHeight: '80vh', overflowY: 'auto' }}>
               <div style={{ width: 40, height: 4, background: C.border, borderRadius: 2, margin: '0 auto 14px' }}/>
               {canEdit && (
-                <label style={{ display: 'block', padding: '14px', border: '1px dashed ' + C.borderDark, borderRadius: 10, color: C.textDim, fontSize: 13, cursor: 'pointer', textAlign: 'center', background: C.surface, marginBottom: 10, fontFamily: 'Barlow Condensed', fontWeight: 600 }}>
-                  {el?.img ? '🔄 CHANGE ELEVATION PHOTO' : '📷 LOAD ELEVATION PHOTO'}
-                  <input type="file" accept="image/*" style={{ display: 'none' }} onChange={e => { onPhoto(e); setShowMore(false); }}/>
-                </label>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, color: C.textDim, marginBottom: 6, textAlign: 'center', fontFamily: 'Barlow Condensed', fontWeight: 600, letterSpacing: 0.5 }}>{el?.img ? 'CHANGE ELEVATION PHOTO' : 'LOAD ELEVATION PHOTO'}</div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <label style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '12px 8px', border: '1.5px solid ' + C.blueBorder, borderRadius: 8, color: C.blue, fontSize: 13, fontWeight: 700, cursor: 'pointer', background: C.blueDim, fontFamily: 'Barlow Condensed', letterSpacing: 0.5 }}>
+                      📷 CAMERA
+                      <input type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={e => { onPhoto(e); setShowMore(false); }}/>
+                    </label>
+                    <label style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '12px 8px', border: '1.5px solid ' + C.border, borderRadius: 8, color: C.textDim, fontSize: 13, fontWeight: 700, cursor: 'pointer', background: C.card, fontFamily: 'Barlow Condensed', letterSpacing: 0.5 }}>
+                      🖼 GALLERY
+                      <input type="file" accept="image/*" style={{ display: 'none' }} onChange={e => { onPhoto(e); setShowMore(false); }}/>
+                    </label>
+                  </div>
+                </div>
               )}
               <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); setShowMore(false); }} style={{ width: '100%', padding: '12px', borderRadius: 10, border: '1px solid ' + C.border, background: C.surface, color: C.textDim, fontSize: 13, fontWeight: 600, cursor: 'pointer', marginBottom: 10, fontFamily: 'Barlow Condensed' }}>⟲ RESET ZOOM ({Math.round(zoom * 100)}%)</button>
               {pins.length > 0 && (
