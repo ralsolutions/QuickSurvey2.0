@@ -636,7 +636,9 @@ export default function App({ onReady }) {
             </div>
           )}
 
-          {/* Photo + pins */}
+          {/* Photo + pins — single scaled container.
+              Image fills the "fit" rect; pins are positioned in image-fraction coords
+              and inverse-scale themselves so they stay the same visual size at any zoom. */}
           {elev?.imgPhotoId && (() => {
             const f = fitDims();
             return (
@@ -646,23 +648,20 @@ export default function App({ onReady }) {
                 transform: `scale(${zoom})`, transformOrigin: '0 0',
                 pointerEvents: 'none',
               }}>
-                <div style={{ position: 'absolute', left: f.ox, top: f.oy, width: f.w, height: f.h, pointerEvents: 'none' }}>
+                <div style={{ position: 'absolute', left: f.ox, top: f.oy, width: f.w, height: f.h }}>
                   <PhotoImg
                     photoId={elev.imgPhotoId}
                     style={{ width: '100%', height: '100%', objectFit: 'fill', display: 'block', userSelect: 'none', pointerEvents: 'none' }}/>
-                  {/* Hidden img for dims */}
                   <ImgDimsLoader photoId={elev.imgPhotoId} onLoad={(w, h) => { if (w !== imgDims.w || h !== imgDims.h) setImgDims({ w, h }); }}/>
-                </div>
-                {/* Pins overlay (positioned in screen coords, but inside the scaled container) */}
-                <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', transform: `scale(${1/zoom})`, transformOrigin: '0 0' }}>
+                  {/* Pins inside the image rect — positioned by image-fraction × image dims */}
                   <PinsLayer
                     pins={elev.pins || []}
                     selectedPinId={selectedPin}
                     movingPinId={movingPin}
                     deleteMode={mode === 'delete'}
-                    fitDims={f}
+                    imgW={f.w}
+                    imgH={f.h}
                     zoom={zoom}
-                    pan={pan}
                     onMarkerClick={onMarkerClick}
                     currentUser={user.name}/>
                 </div>
@@ -865,21 +864,36 @@ function OnlineBanner({ online }) {
   );
 }
 
-// Pins layer — extracted so memo'd Markers don't re-render unnecessarily
-function PinsLayer({ pins, selectedPinId, movingPinId, deleteMode, fitDims, onMarkerClick, currentUser }) {
+// Pins layer — pins live INSIDE the image rect.
+// Each pin is positioned at (frac.x * imgW, frac.y * imgH).
+// Each marker uses translateZ(0) and inverse-scales itself so it stays
+// constant visual size regardless of the parent zoom.
+function PinsLayer({ pins, selectedPinId, movingPinId, deleteMode, imgW, imgH, zoom, onMarkerClick, currentUser }) {
   return (
-    <div style={{ position: 'absolute', left: fitDims.ox, top: fitDims.oy, width: fitDims.w, height: fitDims.h, pointerEvents: 'auto' }}>
+    <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
       {pins.map(pin => (
-        <Marker
+        <div
           key={pin.id}
-          pin={pin}
-          x={pin.x * fitDims.w}
-          y={pin.y * fitDims.h}
-          selected={selectedPinId === pin.id}
-          isMoving={movingPinId === pin.id}
-          isDeleting={deleteMode}
-          onClick={onMarkerClick}
-          currentUser={currentUser}/>
+          style={{
+            position: 'absolute',
+            left: pin.x * imgW,
+            top: pin.y * imgH,
+            // Inverse-scale so the pin stays the same visual size when zoomed
+            transform: `scale(${1 / zoom})`,
+            transformOrigin: 'center top',
+            pointerEvents: 'auto',
+          }}
+        >
+          <Marker
+            pin={pin}
+            x={0}
+            y={0}
+            selected={selectedPinId === pin.id}
+            isMoving={movingPinId === pin.id}
+            isDeleting={deleteMode}
+            onClick={onMarkerClick}
+            currentUser={currentUser}/>
+        </div>
       ))}
     </div>
   );
