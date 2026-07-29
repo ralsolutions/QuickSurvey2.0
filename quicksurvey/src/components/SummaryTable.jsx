@@ -9,7 +9,7 @@ function CommentCell({ pin }) {
   const triggerRef = useRef(null);
   const stages = [
     { key: 'comment', label: 'To Repair', color: '#3b82f6', bg: '#eff6ff', val: pin.comment && pin.comment.trim() ? pin.comment.trim() : null },
-    { key: 'fixingComment', label: 'Fixing', color: '#7c3aed', bg: '#f5f3ff', val: pin.fixingComment && pin.fixingComment.trim() ? pin.fixingComment.trim() : null },
+    { key: 'fixingComment', label: 'In Progress', color: '#7c3aed', bg: '#f5f3ff', val: pin.fixingComment && pin.fixingComment.trim() ? pin.fixingComment.trim() : null },
     { key: 'doneComment', label: 'Done', color: '#16a34a', bg: '#f0fdf4', val: pin.doneComment && pin.doneComment.trim() ? pin.doneComment.trim() : null },
     { key: 'approvalComment', label: 'Client', color: '#dc2626', bg: '#fef2f2', val: pin.approvalComment && pin.approvalComment.trim() ? pin.approvalComment.trim() : null },
   ];
@@ -119,7 +119,7 @@ export function SummaryTable({ project, onClose, user }) {
         {(pin.comment || pin.fixingComment || pin.doneComment || pin.approvalComment) && (
           <div style={{ borderTop: '1px solid ' + C.border, paddingTop: 7, marginTop: 2, display: 'flex', flexDirection: 'column', gap: 5 }}>
             {pin.comment && <div style={{ fontSize: 11, color: '#374151', lineHeight: 1.4 }}><span style={{ fontSize: 9, fontWeight: 700, color: '#3b82f6', background: '#eff6ff', padding: '1px 6px', borderRadius: 3, fontFamily: 'Barlow Condensed', letterSpacing: 0.3, marginRight: 5, border: '1px solid #3b82f644' }}>To Repair</span>{pin.comment}</div>}
-            {pin.fixingComment && <div style={{ fontSize: 11, color: '#374151', lineHeight: 1.4 }}><span style={{ fontSize: 9, fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', padding: '1px 6px', borderRadius: 3, fontFamily: 'Barlow Condensed', letterSpacing: 0.3, marginRight: 5, border: '1px solid #7c3aed44' }}>Fixing</span>{pin.fixingComment}</div>}
+            {pin.fixingComment && <div style={{ fontSize: 11, color: '#374151', lineHeight: 1.4 }}><span style={{ fontSize: 9, fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', padding: '1px 6px', borderRadius: 3, fontFamily: 'Barlow Condensed', letterSpacing: 0.3, marginRight: 5, border: '1px solid #7c3aed44' }}>In Progress</span>{pin.fixingComment}</div>}
             {pin.doneComment && <div style={{ fontSize: 11, color: '#374151', lineHeight: 1.4 }}><span style={{ fontSize: 9, fontWeight: 700, color: '#16a34a', background: '#f0fdf4', padding: '1px 6px', borderRadius: 3, fontFamily: 'Barlow Condensed', letterSpacing: 0.3, marginRight: 5, border: '1px solid #16a34a44' }}>Done</span>{pin.doneComment}</div>}
             {pin.approvalComment && <div style={{ fontSize: 11, color: '#374151', lineHeight: 1.4 }}><span style={{ fontSize: 9, fontWeight: 700, color: '#dc2626', background: '#fef2f2', padding: '1px 6px', borderRadius: 3, fontFamily: 'Barlow Condensed', letterSpacing: 0.3, marginRight: 5, border: '1px solid #dc262644' }}>Client</span>{pin.approvalComment}</div>}
           </div>
