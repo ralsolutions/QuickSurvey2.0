@@ -169,7 +169,7 @@ export function PinModal({ pin, repairList, onSave, onTrash, onDuplicate, onClos
 
               {!isClient && cur === ST.TOREPAIR && !isDeclined && (
                 <button onClick={enterFixing} style={{ width: '100%', padding: '10px', background: '#8b5cf614', border: '1px solid #8b5cf6', borderRadius: 8, color: '#7c3aed', fontWeight: 700, fontSize: 13, cursor: 'pointer', marginBottom: 6, fontFamily: 'Barlow Condensed' }}>
-                  📸 Add Fixing Photos →
+                  📸 Add In-Progress Photos →
                 </button>
               )}
               {!isClient && cur === ST.FIXING && (
@@ -287,7 +287,7 @@ export function PinModal({ pin, repairList, onSave, onTrash, onDuplicate, onClos
           {view === 'fixing' && (
             <>
               <div style={{ padding: '10px 14px', background: isDeclined ? '#fef2f2' : '#8b5cf610', borderRadius: 8, border: '1px solid ' + (isDeclined ? '#fecaca' : '#8b5cf633'), marginBottom: 14 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: isDeclined ? C.declined : '#7c3aed', fontFamily: 'Barlow Condensed' }}>{isDeclined ? 'FIXING DECLINED REPAIR' : 'FIXING PHOTOS'}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: isDeclined ? C.declined : '#7c3aed', fontFamily: 'Barlow Condensed' }}>{isDeclined ? 'IN PROGRESS — DECLINED REPAIR' : 'IN PROGRESS PHOTOS'}</div>
                 <div style={{ fontSize: 11, color: isDeclined ? '#dc262699' : '#7c3aed99', marginTop: 2 }}>1–3 photos{!isOther ? ' · you can update the measurement if needed' : ''}</div>
               </div>
               {rt && !isOther && (
@@ -308,13 +308,13 @@ export function PinModal({ pin, repairList, onSave, onTrash, onDuplicate, onClos
               <textarea value={comment} onChange={e => setComment(e.target.value)} placeholder={measChanged ? 'Explain why the measurement changed...' : 'Notes for this phase...'} rows={2} style={{ ...IS, resize: 'none', marginBottom: 4, borderColor: measChanged && comment.trim().length < 10 ? '#dc2626' : C.border }}/>
               {measChanged && comment.trim().length > 0 && comment.trim().length < 10 && <div style={{ fontSize: 10, color: '#dc2626', marginBottom: 6 }}>{10 - comment.trim().length} more characters needed</div>}
               <div style={{ marginBottom: 10 }}/>
-              <label style={LS}>FIXING PHOTOS (1–3)</label>
-              <StagingArea label="Add fixing photos"/>
+              <label style={LS}>IN PROGRESS PHOTOS (1–3)</label>
+              <StagingArea label="Add in-progress photos"/>
               <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
                 <button onClick={() => setView('status')} style={{ flex: 1, padding: '9px', background: 'transparent', border: '1px solid ' + C.border, borderRadius: 8, color: C.textDim, fontSize: 13, cursor: 'pointer' }}>← Back</button>
                 <button onClick={() => savePhase('fixing')} disabled={saving || !canSave || !commentOk}
                   style={{ flex: 2, padding: '10px', borderRadius: 8, border: 'none', background: (canSave && commentOk) ? (isDeclined ? '#dc2626' : '#7c3aed') : '#e5e7eb', color: (canSave && commentOk) ? '#fff' : '#9ca3af', fontWeight: 700, fontSize: 13, cursor: 'pointer', opacity: saving ? 0.6 : 1, fontFamily: 'Barlow Condensed' }}>
-                  {saving ? 'SAVING...' : 'SAVE FIXING →'}
+                  {saving ? 'SAVING...' : 'SAVE IN PROGRESS →'}
                 </button>
               </div>
             </>
