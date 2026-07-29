@@ -16,6 +16,7 @@ import { SurveyReview } from './components/SurveyReview.jsx';
 import { SummaryTable } from './components/SummaryTable.jsx';
 import { RoleSwitcher } from './components/RoleSwitcher.jsx';
 import { Marker, Toast } from './components/Marker.jsx';
+import { generateSurveyPdf } from './lib/report.js';
 
 // PWA install prompt — capture beforeinstallprompt globally so RoleSwitcher can offer install
 let _deferredPrompt = null;
@@ -75,6 +76,7 @@ export default function App() {
   const [showRole, setShowRole] = useState(false);
   const [indexSearch, setIndexSearch] = useState('');
   const [toast, setToast] = useState(null);
+  const [pdfBusy, setPdfBusy] = useState(false);
   const cRef = useRef(null);
   const iRef = useRef(null);
   const undoStackRef = useRef([]);
@@ -134,6 +136,14 @@ export default function App() {
 
   const pushUndo = (action) => { undoStackRef.current.push(action); if (undoStackRef.current.length > 20) undoStackRef.current.shift(); };
   const undo = () => { const action = undoStackRef.current.pop(); if (!action) { showToast('Nothing to undo'); return; } action(); };
+
+  const exportPdf = async () => {
+    if (pdfBusy) return;
+    setPdfBusy(true); showToast('📄 Generating PDF…');
+    try { await generateSurveyPdf(project, { user }); }
+    catch (e) { console.error('PDF failed', e); showToast('⚠ PDF failed'); }
+    finally { setPdfBusy(false); }
+  };
 
   const clickCoords = e => {
     if (el?.img) { const img = iRef.current; if (!img) return null; const r = img.getBoundingClientRect(); const x = (e.clientX - r.left) / r.width * 100, y = (e.clientY - r.top) / r.height * 100; if (x < 0 || x > 100 || y < 0 || y > 100) return null; return { x, y }; }
@@ -199,12 +209,24 @@ export default function App() {
   };
 
   const onWheel = e => { e.preventDefault(); setZoom(z => Math.min(8, Math.max(0.3, z * (e.deltaY > 0 ? 0.85 : 1.18)))); };
-  const mouseDragRef = useRef({ dragging: false, sx: 0, sy: 0, spx: 0, spy: 0 });
-  const onMouseDown = e => { if (modeRef.current !== 'pan' || isMobile) return; mouseDragRef.current = { dragging: true, sx: e.clientX, sy: e.clientY, spx: pan_.x, spy: pan_.y }; };
-  const onMouseMove = e => { if (!mouseDragRef.current.dragging) return; const d = mouseDragRef.current; setPan({ x: d.spx + (e.clientX - d.sx), y: d.spy + (e.clientY - d.sy) }); };
+  const mouseDragRef = useRef({ dragging: false, moved: false, sx: 0, sy: 0, spx: 0, spy: 0 });
+  const onMouseDown = e => {
+    if (isMobile) return;
+    const d = mouseDragRef.current;
+    d.sx = e.clientX; d.sy = e.clientY; d.moved = false;
+    d.dragging = modeRef.current === 'pan';
+    d.spx = pan_.x; d.spy = pan_.y;
+  };
+  const onMouseMove = e => {
+    const d = mouseDragRef.current;
+    if (Math.abs(e.clientX - d.sx) > 3 || Math.abs(e.clientY - d.sy) > 3) d.moved = true;
+    if (!d.dragging) return;
+    setPan({ x: d.spx + (e.clientX - d.sx), y: d.spy + (e.clientY - d.sy) });
+  };
   const onMouseUp = () => { mouseDragRef.current.dragging = false; };
   const onCanvasClick = e => {
-    if (mouseDragRef.current.sx !== undefined) { const moved = Math.abs(e.clientX - mouseDragRef.current.sx) > 3 || Math.abs(e.clientY - mouseDragRef.current.sy) > 3; if (moved) { mouseDragRef.current.sx = undefined; return; } }
+    if (isMobile) return;
+    if (mouseDragRef.current.moved) { mouseDragRef.current.moved = false; return; }
     const coords = clickCoords(e); if (coords) placeOrHandleCoords(coords);
   };
 
@@ -426,6 +448,7 @@ export default function App() {
                 </div>
               )}
               <button onClick={() => { setShowReview(true); setShowMore(false); }} style={{ width: '100%', padding: '13px', borderRadius: 10, border: '1px solid #d97706', background: '#fef3c7', color: '#92400e', fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 8, fontFamily: 'Barlow Condensed' }}>📋 SURVEY REVIEW</button>
+              {!isClient && <button onClick={() => { exportPdf(); setShowMore(false); }} disabled={pdfBusy} style={{ width: '100%', padding: '13px', borderRadius: 10, border: '1px solid #16a34a', background: '#dcfce7', color: '#166534', fontSize: 13, fontWeight: 700, cursor: pdfBusy ? 'default' : 'pointer', opacity: pdfBusy ? 0.6 : 1, marginBottom: 8, fontFamily: 'Barlow Condensed' }}>{pdfBusy ? '⏳ GENERATING…' : '📄 EXPORT PDF'}</button>}
               {!isClient && <button onClick={() => { setShowT(true); setShowMore(false); }} style={{ width: '100%', padding: '13px', borderRadius: 10, border: '1px solid ' + C.blue, background: C.blueDim, color: C.blue, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 8, fontFamily: 'Barlow Condensed' }}>📊 SUMMARY {total > 0 ? '(' + total + ' PINS)' : ''}</button>}
               {canEdit && <button onClick={() => { setShowTrash(true); setShowMore(false); }} style={{ width: '100%', padding: '13px', borderRadius: 10, border: '1px solid ' + (trashCount > 0 ? '#dc262630' : C.border), background: C.card, color: trashCount > 0 ? '#dc2626aa' : C.textMuted, fontSize: 13, fontWeight: 600, cursor: 'pointer', marginBottom: 8, fontFamily: 'Barlow Condensed' }}>🗑 TRASH {trashCount > 0 ? '(' + trashCount + ')' : ''}</button>}
               <button onClick={() => { setShowRole(true); setShowMore(false); }} style={{ width: '100%', padding: '13px', borderRadius: 10, border: '1px solid ' + C.border, background: C.card, color: C.textDim, fontSize: 13, fontWeight: 600, cursor: 'pointer', marginBottom: 4, fontFamily: 'Barlow Condensed' }}>👤 {user.name} · {user.role.toUpperCase()} — Switch Role</button>
@@ -551,6 +574,7 @@ export default function App() {
         <div style={{ flex: 1 }}/>
         <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid ' + C.border }}>
           <button onClick={() => setShowReview(true)} style={{ width: '100%', padding: '7px', borderRadius: 7, border: '1px solid #d97706', background: '#fef3c7', color: '#92400e', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'Barlow Condensed' }}>📋 SURVEY REVIEW</button>
+          {!isClient && <button onClick={exportPdf} disabled={pdfBusy} style={{ width: '100%', padding: '8px', borderRadius: 7, border: '1px solid #16a34a', background: '#dcfce7', color: '#166534', fontSize: 11, fontWeight: 700, cursor: pdfBusy ? 'default' : 'pointer', opacity: pdfBusy ? 0.6 : 1, fontFamily: 'Barlow Condensed' }}>{pdfBusy ? '⏳ GENERATING…' : '📄 EXPORT PDF'}</button>}
           {!isClient && <button onClick={() => setShowT(true)} style={{ width: '100%', padding: '8px', borderRadius: 7, border: '1px solid ' + C.blue, background: C.blueDim, color: C.blue, fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'Barlow Condensed' }}>📊 SUMMARY {total > 0 ? '(' + total + ')' : ''}</button>}
           {canEdit && <button onClick={() => setShowTrash(true)} style={{ width: '100%', padding: '7px', borderRadius: 7, border: '1px solid ' + (trashCount > 0 ? '#dc262630' : C.border), background: C.card, color: trashCount > 0 ? '#dc2626aa' : C.textMuted, fontSize: 11, cursor: 'pointer', fontFamily: 'Barlow Condensed' }}>🗑 TRASH {trashCount > 0 ? '(' + trashCount + ')' : ''}</button>}
         </div>
